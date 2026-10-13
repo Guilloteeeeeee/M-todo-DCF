@@ -20,7 +20,7 @@ import pandas as pd
 
 from dcf_models import CompanyData
 
-RF_FALLBACK = 0.0425
+RF_FALLBACK = 0.052   # último recurso (bono 10 años EE.UU. ~5,22 % al 08/10/2026, FRED); se usa solo si fallan todas las fuentes en vivo
 PENCE = {"GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0), "ZAc": ("ZAR", 100.0), "ZAC": ("ZAR", 100.0),
          "ILA": ("ILS", 100.0)}
 
@@ -213,9 +213,12 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         shares = _first(sf(keystats.get("impliedSharesOutstanding")), rep_sh)
         if not shares:
             raise DataError("No encontré capitalización ni acciones en circulación.")
-        if adr_ratio and adr_ratio > 0:
+        if adr_ratio and adr_ratio > 0 and fin_cur != qcur:
             shares = shares / adr_ratio
             warns.append(f"Acciones ajustadas por ratio de ADR ingresado: {adr_ratio:g} ordinarias por ADR.")
+        elif adr_ratio and adr_ratio > 0:
+            warns.append(f"Ratio de ADR ({adr_ratio:g}) IGNORADO: la empresa reporta en {fin_cur}, la misma moneda en "
+                         "que cotiza (no parece un ADR). Ponelo en 0 salvo que sea un ADR.")
         elif fin_cur != qcur:
             warns.append("⚠️ Parece un ADR o una cotización en otra moneda y Yahoo no dio la capitalización: "
                          "las acciones son las ORDINARIAS. Si cotiza como ADR, cargá 'ordinarias por ADR' "
@@ -393,20 +396,83 @@ def get_fx(fin: str, quote: str) -> Optional[float]:
     return None
 
 
+def parse_fred_csv(text: str) -> Optional[float]:
+    """Último valor numérico de un CSV de FRED ('DATE,DGS10'), en % (ej. 4.12)."""
+    last = None
+    for line in text.strip().splitlines()[1:]:
+        parts = line.split(",")
+        if len(parts) >= 2:
+            try:
+                last = float(parts[1])
+            except ValueError:
+                continue
+    return last
+
+
+def _fred_10y() -> Optional[float]:
+    """Rendimiento del Tesoro a 10 años desde FRED (Reserva Federal de St. Louis), sin clave."""
+    try:
+        import urllib.request
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10"
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return parse_fred_csv(r.read().decode("utf-8", "ignore"))
+    except Exception:
+        return None
+
+
+def yf_fallback(sym: str) -> dict:
+    """Fuente alternativa (yfinance) para sector, industria, país, beta y crecimiento esperado de ingresos."""
+    out: dict = {}
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(sym)
+    except Exception:
+        return out
+    try:
+        info = tk.info or {}
+        for k_out, k_in in (("sector", "sector"), ("industry", "industry"), ("country", "country")):
+            if info.get(k_in):
+                out[k_out] = str(info[k_in])
+        b = sf(info.get("beta"))
+        if b is not None:
+            out["beta"] = b
+        nm = info.get("longName") or info.get("shortName")
+        if nm:
+            out["name"] = str(nm)
+    except Exception:
+        pass
+    try:
+        re_ = tk.revenue_estimate
+        if re_ is not None and "growth" in getattr(re_, "columns", []):
+            for per, key in (("0y", "g0"), ("+1y", "g1")):
+                if per in re_.index:
+                    v = sf(re_.loc[per, "growth"])
+                    if v is not None:
+                        out[key] = v
+    except Exception:
+        pass
+    return out
+
+
 def get_risk_free() -> Tuple[float, bool]:
-    """Rendimiento del bono a 10 años de EE.UU. (^TNX). (valor, vino_de_yahoo)"""
+    """Rendimiento del bono a 10 años de EE.UU. (^TNX). (valor, vino_de_yahoo).
+    Orden: cotización de Yahoo -> FRED (Reserva Federal) -> historial de Yahoo -> valor fijo."""
+    cands = []
     try:
         from yahooquery import Ticker
         d = Ticker("^TNX").price
-        v = sf(d.get("^TNX", {}).get("regularMarketPrice"))
+        cands.append(sf(d.get("^TNX", {}).get("regularMarketPrice")))
+    except Exception:
+        pass
+    cands.append(_fred_10y())
+    cands.append(_last_close("^TNX"))
+    for v in cands:
         if v:
             if v > 20:
                 v /= 10.0
             r = v / 100.0
             if 0.005 <= r <= 0.12:
                 return r, True
-    except Exception:
-        pass
     return RF_FALLBACK, False
 
 
@@ -439,13 +505,30 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
     fb_price = fb_cur = None
     if not sf(price_m.get("regularMarketPrice")):
         fb_price, fb_cur = _last_close(sym), _guess_currency(sym)
+
+    alt: dict = {}
+    need_alt = (not profile.get("industry") or not (price_m.get("longName") or price_m.get("shortName")) or not any(
+        i.get("revenueEstimate") for i in (trend.get("trend") or []) if isinstance(i, dict))
+        or (sf(summary.get("beta")) is None and sf(keystats.get("beta")) is None))
+    if need_alt:
+        alt = yf_fallback(sym)
+    if alt.get("name") and not (price_m.get("longName") or price_m.get("shortName")):
+        price_m = {**price_m, "longName": alt["name"]}
+    if alt.get("industry") and not profile.get("industry"):
+        profile = {**profile, **{k: alt[k] for k in ("sector", "industry", "country") if alt.get(k)}}
+    if ("g0" in alt or "g1" in alt) and not any(
+            i.get("revenueEstimate") for i in (trend.get("trend") or []) if isinstance(i, dict)):
+        trend = {"trend": [{"period": "0y", "revenueEstimate": {"growth": alt.get("g0")}},
+                           {"period": "+1y", "revenueEstimate": {"growth": alt.get("g1")}}]}
     has_beta = sf(summary.get("beta")) is not None or sf(keystats.get("beta")) is not None
-    fb_beta = None if has_beta else estimate_beta(sym)
+    fb_beta = None if has_beta else (alt.get("beta") if alt.get("beta") is not None else estimate_beta(sym))
 
     rf, ok = get_risk_free()
     co, warns = build_company(sym, price_m, summary, keystats, profile, fin, trend, dfa, dfq, get_fx,
                               rf=rf, allow_annual=allow_annual, fallback_price=fb_price,
                               fallback_currency=fb_cur, adr_ratio=adr_ratio, fallback_beta=fb_beta)
     if not ok:
-        warns.append(f"No pude leer ^TNX: se usó Rf = {RF_FALLBACK:.2%}.")
+        warns.append(f"No pude leer la tasa del Tesoro a 10 años: se usó Rf = {RF_FALLBACK:.2%}.")
+    if alt:
+        warns.append("Sector/industria/estimaciones/beta completados con una fuente alternativa (yfinance).")
     return co, warns

@@ -166,9 +166,53 @@ class ValResult:
 FIN_ER_INDUSTRIES = ("banks", "insurance - ", "mortgage finance", "capital markets", "reit - mortgage")
 
 
+# Dentro de "Credit Services" de Yahoo conviven redes de pagos (asset-light) y prestamistas (balance pesado).
+CREDIT_LENDERS = {"AXP", "COF", "SYF", "DFS", "ALLY", "SOFI", "UPST", "AFRM", "LC", "OMF", "BFH", "SLM", "NAVI",
+                  "ENVA", "OPFI", "MFIN", "CACC", "WRLD", "PRAA", "ECPG", "NNI", "LU"}
+# Respaldo cuando Yahoo no entrega sector/industria (frecuente desde servidores en la nube): emisores conocidos.
+KNOWN_FIN = {
+    "JPM", "BAC", "C", "WFC", "GS", "MS", "BK", "STT", "USB", "PNC", "TFC", "SCHW", "COF_", "FITB", "KEY", "RF", "HBAN",
+    "MTB", "CFG", "NTRS", "ZION", "CMA", "MET", "PRU", "AIG", "ALL", "TRV", "CB", "PGR", "AFL", "HIG", "LNC", "PFG",
+    "CINF", "L", "WRB", "ACGL", "RE", "EG", "UNM", "GL", "AIZ", "BRK-B", "BRK.B",
+    "ITUB", "BBD", "BBDO", "BSBR", "SAN", "BBVA", "HSBC", "UBS", "ING", "BCS", "LYG", "NWG", "DB", "CS", "MUFG", "SMFG",
+    "MFG", "NMR", "IBN", "HDB", "KB", "SHG", "WF", "CIB", "BAP", "BSAC", "BCH", "CM", "RY", "TD", "BMO", "BNS", "NU",
+    "GGAL", "BMA", "BBAR", "SUPV", "BFR", "TFSL", "SIVB", "NYCB", "FHN", "WAL", "PACW", "EWBC", "SNV", "WBS", "OZK",
+    "AXS", "SLF", "MFC", "AEG", "PUK", "MCO_", "BLK_",
+}
+KNOWN_REIT = {
+    "O", "SPG", "PLD", "AMT", "CCI", "EQIX", "PSA", "WELL", "VICI", "DLR", "AVB", "EQR", "ESS", "MAA", "UDR", "INVH",
+    "ARE", "BXP", "KIM", "REG", "FRT", "HST", "EXR", "CUBE", "VTR", "DOC", "SBAC", "IRM", "WPC", "NNN", "ADC", "STAG",
+    "REXR", "FR", "EGP", "CPT", "AMH", "ELS", "SUI", "LAMR", "OUT", "GLPI", "EPR", "LTC", "OHI", "SBRA", "NHI", "MPW",
+    "HR", "KRG", "BRX", "SKT", "APLE", "RHP", "PK", "SITC", "ROIC", "CUZ", "DEI", "HIW", "KRC", "VNO", "SLG", "PEAK",
+}
+_NAME_REIT = ("reit", "realty", "real estate investment", "properties trust", "property trust")
+_NAME_FIN = ("bank", "bancorp", "banco", "banque", "banca", "bancshares", "insurance", "assurance",
+             "assicurazioni", "reinsurance", "financial group", "financial corp", "financial services group")
+
+
 def route_model(co: CompanyData) -> Tuple[str, str]:
     """Devuelve (modelo, motivo). modelo in {'FCFF','ER','REIT'}."""
     ind = (co.industry or "").strip().lower()
+    sec = (co.sector or "").strip().lower()
+    if not ind:
+        # Yahoo no dio la industria: primero el sector, después el nombre y la forma de los estados contables.
+        name = (co.name or "").lower()
+        root = (co.ticker or "").upper().split(".")[0]
+        if root in KNOWN_REIT:
+            return "REIT", "REIT conocido (Yahoo no informó la industria): AFFO. Confirmalo en el selector."
+        if root in KNOWN_FIN:
+            return "ER", "Banco/aseguradora conocido (Yahoo no informó la industria): retorno excedente. Confirmalo en el selector."
+        if sec == "financial services":
+            return "ER", "Sector financiero (industria no informada): retorno excedente."
+        if sec == "real estate":
+            return "REIT", "Sector inmobiliario (industria no informada): se asume REIT de renta; confirmalo."
+        if any(k in name for k in _NAME_REIT):
+            return "REIT", "Detectado por el nombre como REIT: confirmalo en el selector."
+        if any(k in name for k in _NAME_FIN):
+            return "ER", "Detectado por el nombre como banco/aseguradora: confirmalo en el selector."
+        if not sec and co.ebit_ttm <= 0 and (co.ni_ttm or 0) > 0 and (co.equity or 0) > 0:
+            return "ER", ("Sin sector informado y sin resultado operativo (típico de bancos y aseguradoras): "
+                          "retorno excedente. Confirmalo en el selector.")
     if ind.startswith("reit - mortgage"):
         return "ER", "REIT hipotecario: se valúa por patrimonio y ROE (como un financiero)."
     if ind.startswith("reit"):
@@ -183,8 +227,11 @@ def route_model(co: CompanyData) -> Tuple[str, str]:
         return "ER", ("Mercado de capitales (bancos de inversión/brokers): retorno excedente. "
                       "Si es una gestora de activos alternativos (BX, KKR, APO), probá FCFF.")
     if ind == "credit services":
-        return "FCFF", ("Servicios de crédito: si es una red de pagos (V, MA) FCFF es correcto; "
-                        "si es prestamista (AXP, COF, SYF) cambiá a 'Retorno excedente'.")
+        root = (co.ticker or "").upper().split(".")[0]
+        if root in CREDIT_LENDERS:
+            return "ER", "Prestamista de tarjetas/créditos: el crédito es su negocio, se usa retorno excedente."
+        return "FCFF", ("Servicios de crédito: se trata como red de pagos o servicio (V, MA, PYPL), sin cartera de "
+                        "préstamos propia. Si es un prestamista, elegí 'Banco / aseguradora / financiera'.")
     return "FCFF", "Empresa no financiera: FCFF desde ingresos."
 
 
@@ -197,6 +244,11 @@ def cost_of_equity(co: CompanyData, p: Params, scen: Scen, warns: List[str]) -> 
     if beta is None:
         beta = 1.0
         warns.append("Sin beta en Yahoo: se usó beta = 1,0.")
+    elif p.beta is None and not (0.5 <= beta <= 2.0):
+        b0 = beta
+        beta = clamp(beta, 0.5, 2.0)
+        warns.append(f"Beta {b0:.2f} fuera de rango razonable: se acotó a {beta:.2f} "
+                     "(betas muy bajas subestiman el costo del capital).")
     beta_adj = 0.67 * beta + 0.33                      # ajuste de Blume
     if p.ke_override is not None:
         ke = p.ke_override
