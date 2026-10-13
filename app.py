@@ -35,8 +35,8 @@ SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
 
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_load(sym: str, allow_annual: bool):
-    return data_yahoo.load_company(sym, allow_annual)
+def cached_load(sym: str, allow_annual: bool, adr_ratio: float):
+    return data_yahoo.load_company(sym, allow_annual, adr_ratio or None)
 
 
 def pct(x, d=1):
@@ -65,6 +65,9 @@ with st.sidebar:
     mos = st.slider("Margen de seguridad deseado (%)", 0, 50, 20) / 100
     allow_annual = st.checkbox("Permitir último año fiscal si no hay TTM", value=False,
                                help="Por defecto se exigen datos de los últimos 12 meses (TTM).")
+    adr_ratio = st.number_input("Acciones ordinarias por ADR (0 = automático)", 0.0, 1000.0, 0.0, 1.0,
+                                help="Solo para ADRs cuando Yahoo no informa la capitalización. "
+                                     "Ej.: TSM = 5, ASML y NVO = 1, BABA = 8.")
     with st.expander("Ajustes avanzados"):
         margin_mode = st.selectbox("Margen operativo objetivo", ["median", "ttm", "manual"],
                                    format_func={"median": "Mediana histórica (3-4 años + TTM)",
@@ -112,7 +115,7 @@ if not sym:
 # ----------------------------------------------------------------------------
 try:
     with st.spinner(f"Descargando datos de {sym}…"):
-        co, load_warns = cached_load(sym, allow_annual)
+        co, load_warns = cached_load(sym, allow_annual, adr_ratio)
 except Exception as e:  # noqa: BLE001
     st.error(f"No pude cargar **{sym}**: {e}")
     st.stop()
