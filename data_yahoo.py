@@ -168,14 +168,22 @@ def analyst_growth(earnings_trend_mod: dict) -> Tuple[Optional[float], Optional[
 # ----------------------------------------------------------------------------
 def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profile: dict, fin: dict,
                   trend: dict, dfa, dfq, fx_fetcher: Callable[[str, str], Optional[float]],
-                  rf: float = RF_FALLBACK, allow_annual: bool = False) -> Tuple[CompanyData, List[str]]:
+                  rf: float = RF_FALLBACK, allow_annual: bool = False,
+                  fallback_price: Optional[float] = None, fallback_currency: Optional[str] = None,
+                  adr_ratio: Optional[float] = None, fallback_beta: Optional[float] = None
+                  ) -> Tuple[CompanyData, List[str]]:
     warns: List[str] = []
     qt = str(price_m.get("quoteType") or "EQUITY").upper()
     px = sf(price_m.get("regularMarketPrice"))
+    if (px is None or px <= 0) and fallback_price:
+        px = fallback_price
+        warns.append("Yahoo no entregó la cotización completa: el precio salió del último cierre del historial.")
     if px is None or px <= 0:
         raise DataError(f"No encontré precio para '{sym}'. Verificá el ticker (ej.: BRK-B, SAP.DE, 7203.T, TSM).")
 
-    qcur = str(price_m.get("currency") or summary.get("currency") or "USD")
+    qcur = str(price_m.get("currency") or summary.get("currency") or fallback_currency or "USD")
+    if not (price_m.get("currency") or summary.get("currency")) and fallback_currency:
+        warns.append(f"Moneda de cotización supuesta por el sufijo del ticker: {qcur}.")
     pence_div = 1.0
     if qcur in PENCE:
         qcur, pence_div = PENCE[qcur]
@@ -205,6 +213,13 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         shares = _first(sf(keystats.get("impliedSharesOutstanding")), rep_sh)
         if not shares:
             raise DataError("No encontré capitalización ni acciones en circulación.")
+        if adr_ratio and adr_ratio > 0:
+            shares = shares / adr_ratio
+            warns.append(f"Acciones ajustadas por ratio de ADR ingresado: {adr_ratio:g} ordinarias por ADR.")
+        elif fin_cur != qcur:
+            warns.append("⚠️ Parece un ADR o una cotización en otra moneda y Yahoo no dio la capitalización: "
+                         "las acciones son las ORDINARIAS. Si cotiza como ADR, cargá 'ordinarias por ADR' "
+                         "en la barra lateral (ej.: TSM = 5) o el valor por acción saldrá mal.")
         mc = shares * px
         warns.append("Capitalización estimada como acciones × precio.")
     if pence_div != 1.0 and rep_sh and rep_sh > 0:
@@ -276,12 +291,12 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
 
     co = CompanyData(
         ticker=sym.upper(),
-        name=str(price_m.get("longName") or price_m.get("shortName") or sym),
+        name=str(price_m.get("longName") or price_m.get("shortName") or sym.upper()),
         sector=str(profile.get("sector") or ""), industry=str(profile.get("industry") or ""),
         country=str(profile.get("country") or ""), quote_type=qt,
         price=px, currency=qcur, fin_currency=fin_cur, fx=fxr,
         shares_m=shares_m, reported_shares_m=rep_sh_m, market_cap_m=mc_m,
-        beta=_first(sf(summary.get("beta")), sf(keystats.get("beta"))), rf=rf,
+        beta=_first(sf(summary.get("beta")), sf(keystats.get("beta")), fallback_beta), rf=rf,
         revenue_ttm=M(rev) or 0.0, ebit_ttm=M(ebit) or 0.0, da_ttm=abs(M(da) or 0.0),
         capex_ttm=abs(M(capex) or 0.0), nwc_inv_ttm=-(M(dwc) or 0.0), tax_rate_eff=tax_eff,
         interest_expense_ttm=abs(M(intexp)) if intexp is not None else None,
@@ -298,6 +313,11 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     )
     if co.beta is None:
         warns.append("Yahoo no informa beta.")
+    elif sf(summary.get("beta")) is None and sf(keystats.get("beta")) is None:
+        warns.append("Beta calculada con 5 años de rendimientos mensuales contra el S&P 500 (Yahoo no la informó).")
+    if not co.sector and not co.industry:
+        warns.append("⚠️ Yahoo no entregó sector ni industria: el modelo se eligió como empresa NO financiera. "
+                     "Si es banco, aseguradora o REIT, elegí el modelo a mano en el selector.")
     if g0 is None and g1 is None:
         warns.append("Sin estimaciones de analistas de ingresos: el crecimiento inicial sale de la historia.")
     if qt != "EQUITY":
@@ -308,17 +328,68 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
 # ----------------------------------------------------------------------------
 # Descarga
 # ----------------------------------------------------------------------------
+SUFFIX_CCY = {".DE": "EUR", ".F": "EUR", ".PA": "EUR", ".AS": "EUR", ".MC": "EUR", ".MI": "EUR", ".BR": "EUR",
+              ".HE": "EUR", ".LS": "EUR", ".VI": "EUR", ".SW": "CHF", ".L": "GBp", ".T": "JPY", ".TO": "CAD",
+              ".V": "CAD", ".HK": "HKD", ".AX": "AUD", ".SA": "BRL", ".MX": "MXN", ".KS": "KRW", ".TW": "TWD",
+              ".SS": "CNY", ".SZ": "CNY", ".NS": "INR", ".BO": "INR", ".ST": "SEK", ".CO": "DKK", ".OL": "NOK",
+              ".SI": "SGD", ".JO": "ZAc", ".TA": "ILA"}
+
+
+def _last_close(sym: str) -> Optional[float]:
+    """Último cierre vía historial (endpoint distinto al de cotizaciones; suele seguir funcionando)."""
+    try:
+        from yahooquery import Ticker
+        h = Ticker(sym).history(period="5d", interval="1d")
+        if isinstance(h, pd.DataFrame) and len(h) and "close" in h.columns:
+            v = sf(h["close"].dropna().iloc[-1])
+            return v if v and v > 0 else None
+    except Exception:
+        pass
+    return None
+
+
+def _guess_currency(sym: str) -> str:
+    for suf, cur in SUFFIX_CCY.items():
+        if sym.upper().endswith(suf):
+            return cur
+    return "USD"
+
+
+def estimate_beta(sym: str, bench: str = "^GSPC") -> Optional[float]:
+    """Beta de 5 años mensual contra el S&P 500, solo si Yahoo no la informa."""
+    try:
+        from yahooquery import Ticker
+        h = Ticker([sym, bench]).history(period="5y", interval="1mo")
+        if not isinstance(h, pd.DataFrame) or "adjclose" not in h.columns:
+            return None
+        col = "adjclose"
+        a = h.xs(sym, level=0)[col].dropna()
+        b = h.xs(bench, level=0)[col].dropna()
+        df = pd.concat([a.pct_change(), b.pct_change()], axis=1, join="inner").dropna()
+        if len(df) < 24:
+            return None
+        cov = df.iloc[:, 0].cov(df.iloc[:, 1])
+        var = df.iloc[:, 1].var()
+        beta = cov / var if var else None
+        return float(beta) if beta is not None and -1 < beta < 4 else None
+    except Exception:
+        return None
+
+
 def get_fx(fin: str, quote: str) -> Optional[float]:
-    """Cuántas unidades de 'quote' vale 1 unidad de 'fin' (spot de Yahoo)."""
+    """Cuántas unidades de 'quote' vale 1 unidad de 'fin' (spot de Yahoo; si falla, último cierre)."""
     from yahooquery import Ticker
     for pair, inv in ((f"{fin}{quote}=X", False), (f"{quote}{fin}=X", True)):
+        v = None
         try:
             d = Ticker(pair).price
             v = sf(d.get(pair, {}).get("regularMarketPrice")) if isinstance(d, dict) else None
-            if v and v > 0:
-                return 1.0 / v if inv else v
         except Exception:
-            continue
+            v = None
+        if not v:
+            v = _last_close(pair)
+        if v and v > 0:
+            return 1.0 / v if inv else v
     return None
 
 
@@ -339,25 +410,42 @@ def get_risk_free() -> Tuple[float, bool]:
     return RF_FALLBACK, False
 
 
-def load_company(sym: str, allow_annual: bool = False) -> Tuple[CompanyData, List[str]]:
+def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float] = None
+                 ) -> Tuple[CompanyData, List[str]]:
     from yahooquery import Ticker
     sym = sym.strip().upper()
     if not sym:
         raise DataError("Ingresá un ticker.")
     t = Ticker(sym, timeout=20)
-    price_m = mod(t.price, sym)
-    if not price_m:
-        raise DataError(f"Yahoo no devolvió datos para '{sym}'. Verificá el ticker y el sufijo de mercado.")
-    summary, keystats = mod(t.summary_detail, sym), mod(t.key_stats, sym)
-    profile, fin = mod(t.asset_profile, sym), mod(t.financial_data, sym)
-    trend = mod(t.earnings_trend, sym)
-    dfa = t.get_financial_data(ALL_FIELDS, frequency="a", trailing=True)
-    dfq = t.get_financial_data(ALL_FIELDS, frequency="q", trailing=True)
+
+    def safe(fn):
+        try:
+            return mod(fn(), sym)
+        except Exception:
+            return {}
+
+    price_m = safe(lambda: t.price)
+    summary, keystats = safe(lambda: t.summary_detail), safe(lambda: t.key_stats)
+    profile, fin = safe(lambda: t.asset_profile), safe(lambda: t.financial_data)
+    trend = safe(lambda: t.earnings_trend)
+    try:
+        dfa = t.get_financial_data(ALL_FIELDS, frequency="a", trailing=True)
+        dfq = t.get_financial_data(ALL_FIELDS, frequency="q", trailing=True)
+    except Exception as e:  # noqa: BLE001
+        raise DataError(f"Yahoo rechazó la descarga de estados contables de '{sym}': {e}")
     if isinstance(dfa, (str, dict)) and isinstance(dfq, (str, dict)):
-        raise DataError(f"Yahoo no tiene estados contables para '{sym}'.")
+        raise DataError(f"Yahoo no tiene estados contables para '{sym}' (o bloqueó la consulta).")
+
+    fb_price = fb_cur = None
+    if not sf(price_m.get("regularMarketPrice")):
+        fb_price, fb_cur = _last_close(sym), _guess_currency(sym)
+    has_beta = sf(summary.get("beta")) is not None or sf(keystats.get("beta")) is not None
+    fb_beta = None if has_beta else estimate_beta(sym)
+
     rf, ok = get_risk_free()
     co, warns = build_company(sym, price_m, summary, keystats, profile, fin, trend, dfa, dfq, get_fx,
-                              rf=rf, allow_annual=allow_annual)
+                              rf=rf, allow_annual=allow_annual, fallback_price=fb_price,
+                              fallback_currency=fb_cur, adr_ratio=adr_ratio, fallback_beta=fb_beta)
     if not ok:
         warns.append(f"No pude leer ^TNX: se usó Rf = {RF_FALLBACK:.2%}.")
     return co, warns
