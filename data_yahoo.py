@@ -38,6 +38,7 @@ FLOW_FIELDS = [
 BAL_FIELDS = [
     "TotalDebt", "CapitalLeaseObligations", "CashCashEquivalentsAndShortTermInvestments", "MinorityInterest",
     "StockholdersEquity", "CommonStockEquity", "InvestedCapital", "OrdinarySharesNumber",
+    "InvestmentsAndAdvances", "LongTermEquityInvestment",
 ]
 ALL_FIELDS = FLOW_FIELDS + BAL_FIELDS
 
@@ -163,6 +164,28 @@ def analyst_growth(earnings_trend_mod: dict) -> Tuple[Optional[float], Optional[
     return g0, g1
 
 
+def analyst_ranges(earnings_trend_mod: dict) -> dict:
+    """Rango de estimaciones de analistas: crecimiento de ingresos mínimo/máximo y crecimiento esperado del BPA."""
+    out: dict = {}
+    trend = earnings_trend_mod.get("trend") if isinstance(earnings_trend_mod, dict) else None
+    for item in trend or []:
+        if not isinstance(item, dict) or item.get("period") not in ("0y", "+1y"):
+            continue
+        k = "y0" if item["period"] == "0y" else "y1"
+        est = item.get("revenueEstimate") or {}
+        ago = sf(est.get("yearAgoRevenue"))
+        lo, hi = sf(est.get("low")), sf(est.get("high"))
+        if ago and ago > 0:
+            if lo is not None:
+                out["gl_" + k] = lo / ago - 1
+            if hi is not None:
+                out["gh_" + k] = hi / ago - 1
+        eg = sf((item.get("earningsEstimate") or {}).get("growth"))
+        if eg is not None:
+            out["eg_" + k] = eg
+    return out
+
+
 # ----------------------------------------------------------------------------
 # Construcción pura
 # ----------------------------------------------------------------------------
@@ -274,6 +297,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     minority = F.latest("MinorityInterest")
     equity = _first(F.latest("CommonStockEquity"), F.latest("StockholdersEquity"))
     ic = F.latest("InvestedCapital")
+    nonop = _first(F.latest("InvestmentsAndAdvances"), F.latest("LongTermEquityInvestment"))
     if cash is None:
         warns.append("Sin dato de caja: se asumió 0.")
     if debt is None:
@@ -291,12 +315,13 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     ebit_h = [emap.get(d) for d in rd]
 
     g0, g1 = analyst_growth(trend)
+    rng = analyst_ranges(trend)
 
     co = CompanyData(
         ticker=sym.upper(),
         name=str(price_m.get("longName") or price_m.get("shortName") or sym.upper()),
         sector=str(profile.get("sector") or ""), industry=str(profile.get("industry") or ""),
-        country=str(profile.get("country") or ""), quote_type=qt,
+        country=str(profile.get("country") or ""), website=str(profile.get("website") or ""), quote_type=qt,
         price=px, currency=qcur, fin_currency=fin_cur, fx=fxr,
         shares_m=shares_m, reported_shares_m=rep_sh_m, market_cap_m=mc_m,
         beta=_first(sf(summary.get("beta")), sf(keystats.get("beta")), fallback_beta), rf=rf,
@@ -304,9 +329,11 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         capex_ttm=abs(M(capex) or 0.0), nwc_inv_ttm=-(M(dwc) or 0.0), tax_rate_eff=tax_eff,
         interest_expense_ttm=abs(M(intexp)) if intexp is not None else None,
         revenue_hist=[M(x) for x in rev_h], ebit_hist=[M(x) for x in ebit_h],
-        invested_capital=M(ic), cash=M(cash) or 0.0, debt=M(debt) or 0.0,
+        invested_capital=M(ic), non_op_assets=max(M(nonop) or 0.0, 0.0), cash=M(cash) or 0.0, debt=M(debt) or 0.0,
         lease_debt=min(M(lease) or 0.0, M(debt) or 0.0), minority=M(minority) or 0.0,
         rev_g_y0=g0, rev_g_y1=g1,
+        rev_gl_y0=rng.get("gl_y0"), rev_gl_y1=rng.get("gl_y1"), rev_gh_y0=rng.get("gh_y0"), rev_gh_y1=rng.get("gh_y1"),
+        eps_g_y0=rng.get("eg_y0"), eps_g_y1=rng.get("eg_y1"),
         equity=M(equity), ni_ttm=M(ni), ni_hist=[M(x) for x in ni_h], equity_hist=[M(x) for x in eq_h],
         dividends_ttm=abs(M(div) or 0.0), buybacks_ttm=abs(M(bb) or 0.0),
         gains_adj_ttm=M(gains) or 0.0,
@@ -430,7 +457,7 @@ def yf_fallback(sym: str) -> dict:
         return out
     try:
         info = tk.info or {}
-        for k_out, k_in in (("sector", "sector"), ("industry", "industry"), ("country", "country")):
+        for k_out, k_in in (("sector", "sector"), ("industry", "industry"), ("country", "country"), ("website", "website")):
             if info.get(k_in):
                 out[k_out] = str(info[k_in])
         b = sf(info.get("beta"))
@@ -515,7 +542,9 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
     if alt.get("name") and not (price_m.get("longName") or price_m.get("shortName")):
         price_m = {**price_m, "longName": alt["name"]}
     if alt.get("industry") and not profile.get("industry"):
-        profile = {**profile, **{k: alt[k] for k in ("sector", "industry", "country") if alt.get(k)}}
+        profile = {**profile, **{k: alt[k] for k in ("sector", "industry", "country", "website") if alt.get(k)}}
+    if alt.get("website") and not profile.get("website"):
+        profile = {**profile, "website": alt["website"]}
     if ("g0" in alt or "g1" in alt) and not any(
             i.get("revenueEstimate") for i in (trend.get("trend") or []) if isinstance(i, dict)):
         trend = {"trend": [{"period": "0y", "revenueEstimate": {"growth": alt.get("g0")}},

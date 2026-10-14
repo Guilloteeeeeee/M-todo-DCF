@@ -43,6 +43,7 @@ class CompanyData:
     sector: str = ""
     industry: str = ""
     country: str = ""
+    website: str = ""
     quote_type: str = "EQUITY"
 
     price: float = 0.0                 # precio por acción / ADR en moneda de cotización
@@ -66,13 +67,20 @@ class CompanyData:
     interest_expense_ttm: Optional[float] = None
     revenue_hist: List[Optional[float]] = field(default_factory=list)   # anual, antiguo -> reciente
     ebit_hist: List[Optional[float]] = field(default_factory=list)
-    invested_capital: Optional[float] = None
+    invested_capital: Optional[float] = None   # según Yahoo (deuda + patrimonio: INCLUYE caja e inversiones)
+    non_op_assets: float = 0.0         # inversiones de largo plazo en otras empresas / valores (valor contable)
     cash: float = 0.0
     debt: float = 0.0                  # incluye arrendamientos
     lease_debt: float = 0.0            # parte de 'debt' que son arrendamientos
     minority: float = 0.0
     rev_g_y0: Optional[float] = None   # crecimiento ingresos estimado año fiscal en curso
     rev_g_y1: Optional[float] = None   # crecimiento ingresos estimado año fiscal siguiente
+    rev_gl_y0: Optional[float] = None  # crecimiento de ingresos: estimación MÍNIMA de analistas (año en curso)
+    rev_gl_y1: Optional[float] = None
+    rev_gh_y0: Optional[float] = None  # ... estimación MÁXIMA
+    rev_gh_y1: Optional[float] = None
+    eps_g_y0: Optional[float] = None   # crecimiento esperado del BPA (analistas)
+    eps_g_y1: Optional[float] = None
 
     # --- financieras
     equity: Optional[float] = None     # patrimonio común (book value)
@@ -84,6 +92,12 @@ class CompanyData:
 
     # --- REIT
     gains_adj_ttm: float = 0.0         # ajuste a NI por ganancias/pérdidas en venta de activos (signo CF)
+
+    # --- referencia de industria (Damodaran); lo completa la app
+    ind_name: str = ""
+    ind_region: str = ""
+    ind_ubeta: Optional[float] = None      # beta desapalancada del sector (corregida por caja)
+    ind_beta_lev: Optional[float] = None   # beta del sector tal cual (se usa en financieras)
 
     # --- referencia
     target_price: Optional[float] = None
@@ -110,6 +124,8 @@ class Params:
     growth_override: Optional[Tuple[float, float]] = None
     roic_cap: float = 0.40
     include_leases: Optional[bool] = None   # None = automático (EEUU: no; resto: sí)
+    include_nonop: bool = True              # sumar inversiones en otras empresas (valor contable)
+    use_industry_beta: bool = True          # mezclar beta de la acción con la del sector (Damodaran)
     # financieras
     persistence: float = 0.5
     # REIT
@@ -238,18 +254,43 @@ def route_model(co: CompanyData) -> Tuple[str, str]:
 # ----------------------------------------------------------------------------
 # Costo de capital
 # ----------------------------------------------------------------------------
+def _bottom_up_beta(co: CompanyData, p: "Params") -> Optional[float]:
+    """Beta 'bottom-up' (Damodaran): beta desapalancada del sector re-apalancada con la estructura de la empresa."""
+    if co.ind_beta_lev is not None:          # financieras: la deuda es materia prima, se usa la beta del sector
+        return co.ind_beta_lev
+    if co.ind_ubeta is None:
+        return None
+    debt = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
+    de = max(debt, 0.0) / max(co.market_cap_m, 1e-9)
+    return co.ind_ubeta * (1 + (1 - p.marginal_tax) * de)
+
+
 def cost_of_equity(co: CompanyData, p: Params, scen: Scen, warns: List[str]) -> Dict[str, float]:
     rf = p.rf if p.rf is not None else co.rf
     beta = p.beta if p.beta is not None else co.beta
+    bu = _bottom_up_beta(co, p) if (p.beta is None and p.use_industry_beta) else None
     if beta is None:
-        beta = 1.0
-        warns.append("Sin beta en Yahoo: se usó beta = 1,0.")
-    elif p.beta is None and not (0.5 <= beta <= 2.0):
-        b0 = beta
-        beta = clamp(beta, 0.5, 2.0)
-        warns.append(f"Beta {b0:.2f} fuera de rango razonable: se acotó a {beta:.2f} "
-                     "(betas muy bajas subestiman el costo del capital).")
-    beta_adj = 0.67 * beta + 0.33                      # ajuste de Blume
+        if bu is not None:
+            beta = bu
+            warns.append(f"Sin beta de mercado: se usó la del sector ({co.ind_name}) = {bu:.2f}.")
+        else:
+            beta = 1.0
+            warns.append("Sin beta en Yahoo: se usó beta = 1,0.")
+    else:
+        if p.beta is None and not (0.5 <= beta <= 2.0):
+            b0 = beta
+            beta = clamp(beta, 0.5, 2.0)
+            warns.append(f"Beta {b0:.2f} fuera de rango razonable: se acotó a {beta:.2f} "
+                         "(betas muy bajas subestiman el costo del capital).")
+        if bu is not None:
+            b_reg = beta
+            beta = 0.5 * b_reg + 0.5 * bu
+            warns.append(f"Beta mezclada 50/50: la de la acción ({b_reg:.2f}) y la del sector {co.ind_name} "
+                         f"re-apalancada ({bu:.2f}) = {beta:.2f}.")
+    if bu is not None:
+        beta_adj = beta                                # beta de industria ya mezclado: sin Blume (criterio Damodaran)
+    else:
+        beta_adj = 0.67 * beta + 0.33                  # ajuste de Blume (solo si no hay datos de industria)
     if p.ke_override is not None:
         ke = p.ke_override
     else:
@@ -258,14 +299,48 @@ def cost_of_equity(co: CompanyData, p: Params, scen: Scen, warns: List[str]) -> 
     return {"ke": ke, "rf": rf, "beta": beta, "beta_adj": beta_adj}
 
 
+# Spread por calificación sintética según cobertura de intereses (EBIT / intereses), Damodaran enero 2026.
+# Cada fila: (cobertura mínima, spread). Empresas grandes (cap. >= 5.000 M) y chicas/riesgosas.
+_SPREAD_LARGE = [(-1e9, .19), (0.2, .16), (0.65, .1261), (0.8, .0885), (1.25, .0509), (1.5, .0321), (1.75, .0275),
+                 (2.0, .0184), (2.25, .0138), (2.5, .0111), (3.0, .0089), (4.25, .0078), (5.5, .0070), (6.5, .0055), (8.5, .0040)]
+_SPREAD_SMALL = [(-1e9, .19), (0.5, .16), (0.8, .1261), (1.25, .0885), (1.5, .0509), (2.0, .0321), (2.5, .0275),
+                 (3.0, .0184), (3.5, .0138), (4.0, .0111), (4.5, .0089), (6.0, .0078), (7.5, .0070), (9.5, .0055), (12.5, .0040)]
+
+
+_BBB_SPREAD = 0.0111
+_STABLE_IND = ("Utility (General)", "Utility (Water)", "Power", "R.E.I.T.", "Retail (REITs)")
+
+
+def _stable_credit(co: "CompanyData") -> bool:
+    """Utilities y REITs: flujos previsibles, consiguen deuda barata aunque la cobertura sea baja."""
+    ind = (co.industry or "").lower()
+    return co.ind_name in _STABLE_IND or ind.startswith("utilities") or ind.startswith("reit")
+
+
+def synthetic_spread(coverage: float, large: bool) -> float:
+    table = _SPREAD_LARGE if large else _SPREAD_SMALL
+    sp = table[0][1]
+    for lo, v in table:
+        if coverage > lo:
+            sp = v
+    return sp
+
+
 def cost_of_capital(co: CompanyData, p: Params, scen: Scen, warns: List[str]) -> Dict[str, float]:
     c = cost_of_equity(co, p, scen, warns)
     rf, ke = c["rf"], c["ke"]
     debt = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
-    if debt > 0 and co.interest_expense_ttm and co.interest_expense_ttm > 0:
-        kd = clamp(co.interest_expense_ttm / debt, rf + 0.005, rf + 0.06)
+    if co.ebit_ttm > 0 and co.interest_expense_ttm and co.interest_expense_ttm > 0:
+        cov = co.ebit_ttm / co.interest_expense_ttm
+        sp = synthetic_spread(cov, co.market_cap_m >= 5000)
+        note = f"calificación sintética: cobertura {cov:.1f}x"
+        if _stable_credit(co) and sp > _BBB_SPREAD:
+            sp, note = _BBB_SPREAD, note + " (tope BBB: utilities/REITs tienen flujos estables)"
+        kd = rf + sp + p.crp / 1.5                     # + riesgo país (en deuda ~ CRP/1,5)
+        c["kd_note"] = note
     else:
         kd = rf + 0.015
+        c["kd_note"] = "sin datos de cobertura: tasa libre de riesgo + 1,5 %"
     E = max(co.market_cap_m, 1e-9)
     D = max(debt, 0.0)
     we, wd = E / (E + D), D / (E + D)
@@ -293,7 +368,13 @@ def _hist_growth(rev_hist: List[Optional[float]]) -> Optional[float]:
     return statistics.median(yoy)
 
 
-def growth_anchors(co: CompanyData, p: Params, scen: Scen, cap_hi: float = 0.25) -> Tuple[float, float, str]:
+def _range_weight() -> float:
+    return 0.85          # los extremos de analistas son opiniones sueltas: se usa el 85 % de la distancia al promedio
+
+
+def growth_anchors(co: CompanyData, p: Params, scen: Scen, cap_hi: float = 0.25,
+                   use_range: bool = True) -> Tuple[float, float, str]:
+    adj = scen.g_adj
     if p.growth_override is not None:
         g1, g2 = p.growth_override
         src = "manual"
@@ -303,6 +384,22 @@ def growth_anchors(co: CompanyData, p: Params, scen: Scen, cap_hi: float = 0.25)
         g1, g2 = (a + b) / 2.0, b
         g1, g2 = clamp(g1, -0.05, cap_hi), clamp(g2, -0.05, cap_hi)
         src = "analistas"
+        ext = None
+        if use_range and scen.m_rule in ("pess", "opt"):
+            lo = scen.m_rule == "pess"
+            ea = (co.rev_gl_y0 if lo else co.rev_gh_y0)
+            eb = (co.rev_gl_y1 if lo else co.rev_gh_y1)
+            ea = ea if ea is not None else eb
+            eb = eb if eb is not None else ea
+            if ea is not None:
+                e1, e2 = clamp((ea + eb) / 2.0, -0.10, cap_hi + 0.05), clamp(eb, -0.10, cap_hi + 0.05)
+                sgn = -1.0 if lo else 1.0
+                # distancia al caso base: entre 1,5 y 6 puntos, en el sentido del escenario
+                d1 = clamp(sgn * (e1 - g1) * _range_weight(), 0.015, 0.06)
+                d2 = clamp(sgn * (e2 - g2) * _range_weight(), 0.015, 0.06)
+                ext = (sgn * d1, sgn * d2)
+        if ext is not None:
+            g1, g2, adj, src = g1 + ext[0], g2 + ext[1], 0.0, "analistas (rango mín-máx real)"
     else:
         h = _hist_growth(co.revenue_hist)
         if h is None:
@@ -310,7 +407,29 @@ def growth_anchors(co: CompanyData, p: Params, scen: Scen, cap_hi: float = 0.25)
         else:
             src = "histórico (mediana)"
         g1 = g2 = clamp(h, -0.05, 0.12)
-    return g1 + scen.g_adj, g2 + scen.g_adj, src
+    return g1 + adj, g2 + adj, src
+
+
+def analyst_margin(co: CompanyData, m0: float) -> Optional[float]:
+    """Margen EBIT objetivo según analistas: el margen TTM movido por (crecimiento del BPA / crecimiento de ingresos)
+    esperado en los 2 próximos años. Acotado a -15 % / +30 % del margen actual (el BPA también refleja recompras)."""
+    if m0 <= 0:
+        return None
+    eg = [x for x in (co.eps_g_y0, co.eps_g_y1) if x is not None]
+    rg = [x for x in (co.rev_g_y0, co.rev_g_y1) if x is not None]
+    if len(eg) < 2 or len(rg) < 2:
+        return None
+    ratio = (1 + eg[0]) * (1 + eg[1]) / ((1 + rg[0]) * (1 + rg[1]))
+    return m0 * clamp(ratio, 0.85, 1.30)
+
+
+def margin_options(co: CompanyData) -> Dict[str, Optional[float]]:
+    """Margen EBIT objetivo bajo cada criterio (para mostrar lado a lado)."""
+    if co.revenue_ttm <= 0:
+        return {}
+    m0 = co.ebit_ttm / co.revenue_ttm
+    hist = [e / r for r, e in list(zip(co.revenue_hist, co.ebit_hist))[-4:] if r and e is not None and r > 0]
+    return {"ttm": m0, "median": _med(hist + [m0]) if hist else m0, "analysts": analyst_margin(co, m0)}
 
 
 def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float, str]:
@@ -326,6 +445,8 @@ def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float,
         mt, desc = p.margin_manual, "manual"
     elif p.margin_mode == "ttm":
         mt, desc = m0, "TTM"
+    elif p.margin_mode == "analysts" and analyst_margin(co, m0) is not None:
+        mt, desc = analyst_margin(co, m0), "TTM ajustado por la expansión de margen que esperan los analistas"
     else:
         mt = _med(hist + [m0]) if hist else m0
         desc = f"mediana {len(hist)} años + TTM" if hist else "TTM (sin historia)"
@@ -372,9 +493,15 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
 
     tax0 = clamp(co.tax_rate_eff, 0.0, 0.35) if co.tax_rate_eff is not None else p.marginal_tax
     nopat0 = co.ebit_ttm * (1 - tax0)
-    ic = co.invested_capital
-    if not ic or ic <= 0:
-        ic = max(co.debt + (co.equity or 0.0) - co.cash, 0.0)
+    nonop = co.non_op_assets if p.include_nonop else 0.0
+    # Capital invertido OPERATIVO (criterio Damodaran): deuda + patrimonio - caja - inversiones no operativas
+    debt_ic = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
+    if co.equity is not None:
+        ic = debt_ic + co.equity + co.minority - co.cash - nonop
+    elif co.invested_capital:
+        ic = co.invested_capital - co.cash - nonop
+    else:
+        ic = 0.0
     if ic > 0:
         roic0 = clamp(nopat0 / ic, 0.03, p.roic_cap)
     else:
@@ -391,7 +518,10 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
             return g2
         if t > N:
             return gT
-        return g2 + (gT - g2) * (t - 2) / max(1, N - 2)
+        hold = min(5, N - 1)                      # como Damodaran: se sostiene hasta el año 5 y recién ahí baja
+        if t <= hold:
+            return g2
+        return g2 + (gT - g2) * (t - hold) / max(1, N - hold)
 
     rev = co.revenue_ttm
     rows, pv_sum = [], 0.0
@@ -420,7 +550,9 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     pv_tv = tv / (1 + wacc) ** N
     ev = pv_sum + pv_tv
     debt_sub = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
-    equity = ev + co.cash - debt_sub - co.minority
+    equity = ev + co.cash + nonop - debt_sub - co.minority
+    if nonop > 0.15 * co.market_cap_m:
+        warns.append(f"Las inversiones en otras empresas ({nonop:,.0f} M) pesan más del 15 % de la capitalización y se suman a valor contable (puede diferir del de mercado).")
     per_share = equity / co.shares_m
     tv_share = pv_tv / ev if ev > 0 else float("nan")
 
@@ -437,10 +569,10 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     return ValResult(
         model="FCFF", scenario=scen.name, per_share=per_share, equity_value=equity, ev=ev,
         discount_rate=wacc, ke=ke, g_terminal=gT, tv_share=tv_share, table=rows, warnings=warns,
-        extras=dict(wacc=wacc, ke=ke, kd=c["kd"], we=c["we"], wd=c["wd"], beta=c["beta"], rf=c["rf"],
+        extras=dict(wacc=wacc, ke=ke, kd=c["kd"], kd_note=c.get("kd_note", ""), we=c["we"], wd=c["wd"], beta=c["beta"], rf=c["rf"],
                     g1=g1, g2=g2, margin0=m0, margin_target=mT, roic0=roic0, roicT=roicT,
                     rr0=rr0, exit_ev_ebit=exit_mult, tv=tv, pv_explicit=pv_sum, pv_tv=pv_tv,
-                    cash=co.cash, debt=debt_sub, minority=co.minority, spread=spread),
+                    cash=co.cash, nonop=nonop, ic_op=ic, debt=debt_sub, minority=co.minority, spread=spread),
     )
 
 
@@ -518,7 +650,7 @@ def excess_return_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
                     roe_ttm=roe_ttm, roe_med=roe_med if roe_med is not None else float("nan"),
                     roe_norm=roe_norm, roe_T=roe_T, payout0=payout0, payoutT=payoutT,
                     pb_implied=equity / bv0, pe_implied=equity / co.ni_ttm if co.ni_ttm > 0 else float("nan"),
-                    pb_current=co.market_cap_m / bv0, persistence=pers),
+                    pb_current=co.market_cap_m / bv0, persistence=pers, pv_explicit=pv_sum, pv_tv=pv_tv),
     )
 
 
@@ -550,12 +682,15 @@ def reit_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     if affo0 <= 0:
         raise ModelError("AFFO/FFO ≤ 0: el modelo no aplica.")
 
-    g1, g2, g_src = growth_anchors(co, p, replace(scen, g_adj=0.5 * scen.g_adj), cap_hi=0.06)
+    g1, g2, g_src = growth_anchors(co, p, replace(scen, g_adj=0.5 * scen.g_adj), cap_hi=0.06, use_range=False)
     g0 = clamp(g1, -0.02, 0.06 + abs(0.5 * scen.g_adj))
     roi = ke + (scen.roi_spread if scen.roi_spread is not None else p.roi_spread)
 
     def g_path(t: int) -> float:
-        return gT if t > N else g0 + (gT - g0) * t / N
+        if t > N:
+            return gT
+        hold = min(5, N - 1)
+        return g0 if t <= hold else g0 + (gT - g0) * (t - hold) / max(1, N - hold)
 
     affo = affo0
     rows, pv_sum = [], 0.0
@@ -579,7 +714,7 @@ def reit_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         discount_rate=ke, ke=ke, g_terminal=gT, tv_share=tv_share, table=rows, warnings=warns,
         extras=dict(ke=ke, beta=c["beta"], rf=c["rf"], ffo=ffo, affo0=affo0, affo_ps=affo0 / co.shares_m,
                     affo_src=affo_src, g0=g0, roi=roi,
-                    p_affo_implied=equity / affo0, p_affo_current=co.market_cap_m / affo0),
+                    p_affo_implied=equity / affo0, p_affo_current=co.market_cap_m / affo0, pv_explicit=pv_sum, pv_tv=pv_tv),
     )
 
 
