@@ -98,6 +98,9 @@ class CompanyData:
     ind_region: str = ""
     ind_ubeta: Optional[float] = None      # beta desapalancada del sector (corregida por caja)
     ind_beta_lev: Optional[float] = None   # beta del sector tal cual (se usa en financieras)
+    ind_roc: Optional[float] = None        # retorno sobre capital promedio del sector (Damodaran)
+    ind_margin: Optional[float] = None     # margen EBIT promedio del sector (Damodaran)
+    ind_de: Optional[float] = None         # deuda / capital propio de mercado promedio del sector
 
     # --- referencia
     target_price: Optional[float] = None
@@ -120,12 +123,14 @@ class Params:
     margin_mode: str = "median"        # median | ttm | manual
     margin_manual: Optional[float] = None
     margin_years: int = 5
-    moat_spread: float = 0.02          # ROIC terminal = WACC + spread
+    moat: str = "auto"                 # auto | Ninguno | Estrecho | Amplio
+    moat_spread: Optional[float] = None    # si se fija, reemplaza al moat (uso interno / pruebas)
     growth_override: Optional[Tuple[float, float]] = None
     roic_cap: float = 0.40
     include_leases: Optional[bool] = None   # None = automático (EEUU: no; resto: sí)
     include_nonop: bool = True              # sumar inversiones en otras empresas (valor contable)
     use_industry_beta: bool = True          # mezclar beta de la acción con la del sector (Damodaran)
+    wacc_shift: float = 0.0                 # desplazamiento de la tasa de descuento (solo la grilla de sensibilidad)
     # financieras
     persistence: float = 0.5
     # REIT
@@ -138,9 +143,7 @@ class Params:
 class Scen:
     name: str = "Base"
     g_adj: float = 0.0
-    gT_adj: float = 0.0
     m_rule: str = "base"               # base | pess | opt
-    wacc_adj: float = 0.0
     spread_delta: float = 0.0
     persistence: Optional[float] = None
     roe_scale: float = 1.0
@@ -148,10 +151,11 @@ class Scen:
 
 
 SCENARIOS: Dict[str, Scen] = {
-    "Pesimista": Scen("Pesimista", g_adj=-0.03, gT_adj=-0.005, m_rule="pess", wacc_adj=+0.01,
+    # Los escenarios solo mueven palancas del negocio (crecimiento, margen, foso). Tasas y g terminal: pestaña Sensibilidad.
+    "Pesimista": Scen("Pesimista", g_adj=-0.03, m_rule="pess",
                       spread_delta=-0.02, persistence=0.0, roe_scale=0.90, roi_spread=0.0),
     "Base": Scen("Base"),
-    "Optimista": Scen("Optimista", g_adj=+0.03, gT_adj=+0.005, m_rule="opt", wacc_adj=-0.01,
+    "Optimista": Scen("Optimista", g_adj=+0.03, m_rule="opt",
                       spread_delta=+0.02, persistence=0.75, roe_scale=1.05, roi_spread=0.02),
 }
 
@@ -266,36 +270,41 @@ def _bottom_up_beta(co: CompanyData, p: "Params") -> Optional[float]:
 
 
 def cost_of_equity(co: CompanyData, p: Params, scen: Scen, warns: List[str]) -> Dict[str, float]:
+    """Beta: (1) si hay datos de industria, la beta de la industria re-apalancada con la deuda de la empresa
+    (criterio Damodaran: el promedio de muchas empresas tiene mucho menos error que la regresión de una sola);
+    (2) sin industria, beta de la acción con ajuste de Blume (0,67·β + 0,33), sin piso;
+    (3) beta propia ≤ 0 o ausente: no es confiable, se usa 1,0 (el promedio del mercado)."""
     rf = p.rf if p.rf is not None else co.rf
-    beta = p.beta if p.beta is not None else co.beta
     bu = _bottom_up_beta(co, p) if (p.beta is None and p.use_industry_beta) else None
-    if beta is None:
-        if bu is not None:
-            beta = bu
-            warns.append(f"Sin beta de mercado: se usó la del sector ({co.ind_name}) = {bu:.2f}.")
-        else:
-            beta = 1.0
-            warns.append("Sin beta en Yahoo: se usó beta = 1,0.")
+    if p.beta is not None:                          # beta cargada a mano
+        beta, beta_adj = p.beta, 0.67 * p.beta + 0.33
+    elif bu is not None:
+        beta = beta_adj = bu
+        own = co.beta
+        txt = (f"Beta de la industria ({co.ind_name}) re-apalancada con la deuda de la empresa = {bu:.2f}. "
+               "La beta propia de la acción no se usa")
+        txt += f" (era {own:.2f})." if own is not None else "."
+        warns.append(txt)
+        if own is not None and abs(own - bu) > 0.5:
+            warns.append(f"La beta propia de la acción ({own:.2f}) difiere mucho de la de su industria ({bu:.2f}): "
+                         "revisá que la industria detectada sea la correcta (barra lateral → Ajustes avanzados).")
     else:
-        if p.beta is None and not (0.5 <= beta <= 2.0):
-            b0 = beta
-            beta = clamp(beta, 0.5, 2.0)
-            warns.append(f"Beta {b0:.2f} fuera de rango razonable: se acotó a {beta:.2f} "
-                         "(betas muy bajas subestiman el costo del capital).")
-        if bu is not None:
-            b_reg = beta
-            beta = 0.5 * b_reg + 0.5 * bu
-            warns.append(f"Beta mezclada 50/50: la de la acción ({b_reg:.2f}) y la del sector {co.ind_name} "
-                         f"re-apalancada ({bu:.2f}) = {beta:.2f}.")
-    if bu is not None:
-        beta_adj = beta                                # beta de industria ya mezclado: sin Blume (criterio Damodaran)
-    else:
-        beta_adj = 0.67 * beta + 0.33                  # ajuste de Blume (solo si no hay datos de industria)
+        raw = co.beta
+        if raw is None:
+            raw = 1.0
+            warns.append("Sin beta en Yahoo ni datos de industria: se usó beta = 1,0.")
+        elif raw <= 0:
+            warns.append(f"Beta de la acción {raw:.2f} (≤ 0): no es confiable; se usó 1,0 (el promedio del mercado).")
+            raw = 1.0
+        elif raw > 2.0:
+            warns.append(f"Beta {raw:.2f} muy alta: se acotó a 2,0.")
+            raw = 2.0
+        beta = raw
+        beta_adj = 0.67 * raw + 0.33                   # ajuste de Blume (solo si no hay datos de industria)
     if p.ke_override is not None:
         ke = p.ke_override
     else:
         ke = rf + beta_adj * p.erp + p.crp
-    ke += scen.wacc_adj
     return {"ke": ke, "rf": rf, "beta": beta, "beta_adj": beta_adj}
 
 
@@ -346,9 +355,25 @@ def cost_of_capital(co: CompanyData, p: Params, scen: Scen, warns: List[str]) ->
     we, wd = E / (E + D), D / (E + D)
     wacc = we * ke + wd * kd * (1 - p.marginal_tax)
     if p.wacc_override is not None:
-        wacc = p.wacc_override + scen.wacc_adj
+        wacc = p.wacc_override
+    wacc += p.wacc_shift
     c.update(kd=kd, we=we, wd=wd, wacc=wacc)
     return c
+
+
+def sector_wacc(co: CompanyData, p: Params) -> Optional[float]:
+    """WACC 'maduro' de la industria, reconstruido con las mismas tasas que la empresa (Rf, prima de mercado, prima país):
+    beta desapalancada del sector re-apalancada con su D/E típico, deuda a Rf + spread BBB (así lo arma Damodaran).
+    La empresa converge hacia este valor en la segunda parte del horizonte."""
+    if co.ind_ubeta is None or co.ind_de is None:
+        return None
+    rf = p.rf if p.rf is not None else co.rf
+    tm = p.marginal_tax
+    de = max(co.ind_de, 0.0)
+    ke = rf + co.ind_ubeta * (1 + (1 - tm) * de) * p.erp + p.crp
+    kd = rf + _BBB_SPREAD + p.crp / 1.5
+    we = 1.0 / (1.0 + de)
+    return we * ke + (1 - we) * kd * (1 - tm) + p.wacc_shift
 
 
 def _leases_included(co: CompanyData, p: Params) -> bool:
@@ -443,6 +468,13 @@ def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float,
             hist.append(e / r)
     if p.margin_mode == "manual" and p.margin_manual is not None:
         mt, desc = p.margin_manual, "manual"
+    elif m0 <= 0:
+        # Empresa con pérdida operativa: no hay margen propio útil; se converge al margen típico de su industria.
+        if co.ind_margin is not None and co.ind_margin > 0:
+            mt, desc = co.ind_margin, f"promedio de la industria {co.ind_name} (la empresa tiene pérdida operativa)"
+        else:
+            raise ModelError("EBIT TTM ≤ 0 y no hay datos de industria para estimar un margen objetivo. "
+                             "Elegí la industria en Ajustes avanzados o cargá un margen objetivo manual.")
     elif p.margin_mode == "ttm":
         mt, desc = m0, "TTM"
     elif p.margin_mode == "analysts" and analyst_margin(co, m0) is not None:
@@ -457,42 +489,126 @@ def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float,
     return m0, mt, desc
 
 
-def moat_for(p: Params, scen: Scen) -> float:
-    return max(0.0, p.moat_spread + scen.spread_delta)
+# ----------------------------------------------------------------------------
+# Foso (moat) automático
+# ----------------------------------------------------------------------------
+def classify_moat(co: CompanyData, wacc: float, roic_now: Optional[float], loss: bool) -> Tuple[str, List[str]]:
+    """Estimación propia del foso con tres criterios (cada uno suma 1):
+      1. Retorno sobre capital (ROIC) ≥ el mayor entre el ROC del sector y WACC + 5 pp (sin sector: WACC + 8 pp).
+      2. Margen EBIT (mediana de 4 años + TTM) ≥ margen del sector + 5 pp.
+      3. Margen estable: rango (máx − mín) ≤ 4 pp en los últimos años y siempre positivo.
+    Amplio = 2 o más, con el ROIC obligatorio · Estrecho = al menos 1 · Ninguno = 0."""
+    if loss:
+        return "Ninguno", ["Pérdida operativa: los números no muestran ventaja competitiva."]
+    reasons: List[str] = []
+    hits = {1: False, 2: False, 3: False}
+    if roic_now is None:
+        reasons.append("1) ROIC: sin capital invertido utilizable, no se evalúa.")
+    else:
+        if co.ind_roc is not None:
+            thr, how = max(co.ind_roc, wacc + 0.05), "el mayor entre el ROC del sector y WACC + 5 pp"
+        else:
+            thr, how = wacc + 0.08, "WACC + 8 pp (sin datos del sector)"
+        hits[1] = roic_now >= thr
+        reasons.append(f"1) ROIC {roic_now:.1%} {'≥' if hits[1] else '<'} {thr:.1%} ({how}): {'sí' if hits[1] else 'no'}.")
+    ms = [e / r for r, e in list(zip(co.revenue_hist, co.ebit_hist))[-4:] if r and e is not None and r > 0]
+    if co.revenue_ttm > 0:
+        ms.append(co.ebit_ttm / co.revenue_ttm)
+    med = _med(ms) if ms else None
+    if co.ind_margin is not None and med is not None:
+        hits[2] = med >= co.ind_margin + 0.05
+        reasons.append(f"2) Margen EBIT {med:.1%} {'≥' if hits[2] else '<'} {co.ind_margin + 0.05:.1%} "
+                       f"(sector {co.ind_margin:.1%} + 5 pp): {'sí' if hits[2] else 'no'}.")
+    else:
+        reasons.append("2) Margen vs sector: sin datos del sector, no se evalúa.")
+    if len(ms) >= 3:
+        rng = max(ms) - min(ms)
+        hits[3] = rng <= 0.04 and min(ms) > 0
+        reasons.append(f"3) Rango del margen {rng:.1%} {'≤' if hits[3] else '>'} 4 pp: {'sí' if hits[3] else 'no'}.")
+    else:
+        reasons.append("3) Estabilidad del margen: faltan años de historia, no se evalúa.")
+    n = sum(hits.values())
+    label = "Amplio" if (hits[1] and n >= 2) else ("Estrecho" if n >= 1 else "Ninguno")
+    return label, reasons
 
 
-def _guard_g(g: float, r: float, warns: List[str], label: str = "tasa") -> float:
-    if r - g < 0.01:
-        warns.append(f"g terminal ({g:.2%}) quedó a menos de 1 pp de la {label} ({r:.2%}); se ajustó.")
-        return r - 0.01
+def _terminal_roic(co: CompanyData, spread: float, wacc: float, roic0: float, spread_delta: float,
+                   roic_cap: float) -> Tuple[float, str]:
+    """ROIC al que converge el negocio en el terminal.
+    Sin dato de industria: WACC + spread del moat (Ninguno 0 / Estrecho 2 pp / Amplio 5 pp).
+    Con dato de industria (criterio Damodaran: una ventaja sostenida mantiene el ROC del sector):
+      Ninguno  = WACC
+      Estrecho = punto medio entre WACC y el ROC del sector (mínimo WACC + 2 pp)
+      Amplio   = ROC del sector (mínimo WACC + 5 pp)
+    Nunca por encima del ROIC actual de la empresa ni del tope. Escenarios: -2 pp / +2 pp en el spread."""
+    roc = co.ind_roc
+    note = ""
+    if roc is not None and spread > 0:
+        roc = clamp(roc, wacc, roic_cap)
+        if spread >= 0.05:
+            tgt = max(wacc + spread, roc)
+        else:
+            tgt = max(wacc + spread, wacc + 0.5 * (roc - wacc))
+        cap = max(roic0, wacc + spread)
+        tgt = min(tgt, cap)
+        note = f"anclado al ROC del sector ({co.ind_roc:.1%})"
+    else:
+        tgt = wacc + spread
+    roicT = max(wacc, tgt + spread_delta)
+    return roicT, note
+
+
+def _guard_g(g: float, r: float, warns: List[str], label: str = "tasa", gap: float = 0.01) -> float:
+    """Mantiene una distancia mínima entre la tasa de descuento y g: con menos de ~2,5 pp el valor terminal
+    se vuelve explosivo (EV/NOPAT > 35x) y deja de ser informativo."""
+    if r - g < gap:
+        warns.append(f"g terminal ({g:.2%}) quedó a menos de {gap * 100:.1f} pp de la {label} ({r:.2%}); se ajustó.")
+        return r - gap
     return g
 
 
 # ----------------------------------------------------------------------------
 # Modelo 1: FCFF
 # ----------------------------------------------------------------------------
+def terminal_growth_default(rf: float) -> float:
+    """g terminal automático: tasa libre de riesgo − 1 punto, entre PIB nominal − 0,5 (3,5 %) y 4,0 %."""
+    return clamp(rf - 0.01, 0.035, 0.04)
+
+
 def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     warns: List[str] = []
     N = int(clamp(p.horizon, 5, 20))
-    if co.ebit_ttm <= 0:
-        raise ModelError("EBIT TTM ≤ 0: el FCFF desde márgenes no es confiable. "
-                         "Usá EV/Ventas u otro múltiplo para esta empresa.")
+    loss = co.ebit_ttm <= 0
     if co.shares_m <= 0 or co.price <= 0:
         raise ModelError("Faltan precio o acciones.")
+
+    m0, mT, m_desc = margin_target(co, p, scen)          # puede levantar ModelError (pérdida sin referencia)
+    if loss:
+        _, m_ref, _ = margin_target(co, p, replace(scen, m_rule="base"))
+        warns.append(f"La empresa tiene pérdida operativa (EBIT TTM ≤ 0): el valor supone que el margen llega a "
+                     f"{m_ref:.1%} ({m_desc}). Es un escenario, no una estimación: revisalo con cuidado.")
 
     c = cost_of_capital(co, p, scen, warns)
     wacc, ke = c["wacc"], c["ke"]
     if wacc < 0.055:
         warns.append(f"WACC muy bajo ({wacc:.2%}): el valor es hipersensible. Revisá Rf/beta.")
-    gT = clamp(p.g_terminal + scen.gT_adj, -0.01, 0.045)
-    gT = _guard_g(gT, wacc, warns, "WACC")
+    # El costo del capital converge al del sector (Damodaran). Con WACC manual o sin datos de industria queda constante.
+    wacc_T = sector_wacc(co, p) if p.wacc_override is None else None
+    if wacc_T is None:
+        wacc_T = wacc
+    elif abs(wacc_T - wacc) > 0.015:
+        warns.append(f"El WACC converge de {wacc:.2%} (empresa) a {wacc_T:.2%} (sector {co.ind_name}).")
+    gT = clamp(p.g_terminal, -0.01, 0.045)
+    gT = _guard_g(gT, wacc_T, warns, "WACC", gap=0.025)
 
     g1, g2, g_src = growth_anchors(co, p, scen)
-    m0, mT, m_desc = margin_target(co, p, scen)
     my = max(1, min(p.margin_years, N))
 
     tax0 = clamp(co.tax_rate_eff, 0.0, 0.35) if co.tax_rate_eff is not None else p.marginal_tax
-    nopat0 = co.ebit_ttm * (1 - tax0)
+    if loss:
+        tax0 = p.marginal_tax
+    tax_target = p.marginal_tax                          # la tasa efectiva converge a la marginal del país
+    nopat0 = co.ebit_ttm * (1 - tax0) if not loss else co.revenue_ttm * m_ref * (1 - tax0)
     nonop = co.non_op_assets if p.include_nonop else 0.0
     # Capital invertido OPERATIVO (criterio Damodaran): deuda + patrimonio - caja - inversiones no operativas
     debt_ic = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
@@ -507,9 +623,26 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     else:
         roic0 = p.roic_cap
         warns.append("Sin capital invertido utilizable: ROIC inicial = tope.")
-    spread = moat_for(p, scen)
-    roicT = wacc + spread
-    rr0 = clamp((co.capex_ttm - co.da_ttm + co.nwc_inv_ttm) / nopat0, -0.3, 1.5)
+    if not loss and co.capex_ttm is not None:
+        fcf_est = nopat0 + co.da_ttm - co.capex_ttm - co.nwc_inv_ttm
+        if fcf_est < 0:
+            warns.append(f"El flujo libre estimado de los últimos 12 meses es negativo ({fcf_est:,.0f} M): "
+                         "el valor depende de que la inversión actual rinda más adelante.")
+
+    # Foso: automático (estimación propia con tres criterios) o elegido a mano.
+    if p.moat_spread is not None:
+        moat_label = next((k for k, v in MOAT_SPREADS.items() if abs(v - p.moat_spread) < 1e-9), "personalizado")
+        spread_base, moat_reasons, moat_src = p.moat_spread, ["Spread fijado por parámetro."], "fijado"
+    elif p.moat in MOAT_SPREADS:
+        moat_label, spread_base = p.moat, MOAT_SPREADS[p.moat]
+        moat_reasons, moat_src = ["Elegido por vos."], "elegido"
+    else:
+        moat_label, moat_reasons = classify_moat(co, wacc, roic0 if ic > 0 else None, loss)
+        spread_base, moat_src = MOAT_SPREADS[moat_label], "automático"
+    spread = max(0.0, spread_base + scen.spread_delta)
+    roicT, roic_note = _terminal_roic(co, spread_base, wacc_T, roic0, scen.spread_delta, p.roic_cap)
+
+    hold = min(5, N - 1)                                  # como Damodaran: se sostiene hasta el año 5 y recién ahí baja
 
     def g_path(t: int) -> float:
         if t == 1:
@@ -518,36 +651,42 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
             return g2
         if t > N:
             return gT
-        hold = min(5, N - 1)                      # como Damodaran: se sostiene hasta el año 5 y recién ahí baja
         if t <= hold:
             return g2
         return g2 + (gT - g2) * (t - hold) / max(1, N - hold)
 
+    def wacc_path(t: int) -> float:
+        if t <= hold:
+            return wacc
+        return wacc + (wacc_T - wacc) * min(1.0, (t - hold) / max(1, N - hold))
+
     rev = co.revenue_ttm
     rows, pv_sum = [], 0.0
     nopat_N = None
+    df = 1.0
     for t in range(1, N + 1):
         g = g_path(t)
         rev *= (1 + g)
         m = m0 + (mT - m0) * min(1.0, t / my)
-        tax = tax0 + (p.marginal_tax - tax0) * min(1.0, t / 5)
+        tax = tax0 + (tax_target - tax0) * min(1.0, t / 5)
         roic = roic0 + (roicT - roic0) * t / N
         ebit = rev * m
+        tax = tax if ebit > 0 else 0.0           # sin impuesto mientras hay pérdida (no se modelan quebrantos acumulados)
         nopat = ebit * (1 - tax)
-        w = max(0.0, 1 - t / 5)
-        rr_ss = g_path(t + 1) / roic          # la reinversión de hoy financia el crecimiento de mañana
-        rr = clamp(w * rr0 + (1 - w) * rr_ss, -0.3, 1.5)
+        rr = clamp(g_path(t + 1) / roic, -0.3, 1.5)   # la reinversión de hoy financia el crecimiento de mañana
         fcff = nopat * (1 - rr)
-        pv = fcff / (1 + wacc) ** t
+        wt = wacc_path(t)
+        df *= (1 + wt)
+        pv = fcff / df
         pv_sum += pv
         rows.append(dict(Año=t, Crecimiento=g, Ingresos=rev, Margen=m, EBIT=ebit, Impuesto=tax,
-                         NOPAT=nopat, Reinversión=rr, ROIC=roic, FCFF=fcff, VP=pv))
+                         NOPAT=nopat, Reinversión=rr, ROIC=roic, WACC=wt, FCFF=fcff, VP=pv))
         nopat_N = nopat
         ebit_N = ebit
 
     nopat_next = nopat_N * (1 + gT)
-    tv = nopat_next * (1 - gT / roicT) / (wacc - gT)
-    pv_tv = tv / (1 + wacc) ** N
+    tv = nopat_next * (1 - gT / roicT) / (wacc_T - gT)
+    pv_tv = tv / df
     ev = pv_sum + pv_tv
     debt_sub = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
     equity = ev + co.cash + nonop - debt_sub - co.minority
@@ -569,9 +708,12 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     return ValResult(
         model="FCFF", scenario=scen.name, per_share=per_share, equity_value=equity, ev=ev,
         discount_rate=wacc, ke=ke, g_terminal=gT, tv_share=tv_share, table=rows, warnings=warns,
-        extras=dict(wacc=wacc, ke=ke, kd=c["kd"], kd_note=c.get("kd_note", ""), we=c["we"], wd=c["wd"], beta=c["beta"], rf=c["rf"],
-                    g1=g1, g2=g2, margin0=m0, margin_target=mT, roic0=roic0, roicT=roicT,
-                    rr0=rr0, exit_ev_ebit=exit_mult, tv=tv, pv_explicit=pv_sum, pv_tv=pv_tv,
+        extras=dict(wacc=wacc, wacc_T=wacc_T, ke=ke, kd=c["kd"], kd_note=c.get("kd_note", ""), we=c["we"], wd=c["wd"],
+                    beta=c["beta"], rf=c["rf"],
+                    g1=g1, g2=g2, g_src=g_src, margin0=m0, margin_target=mT, roic0=roic0, roicT=roicT,
+                    moat_label=moat_label, moat_reasons=moat_reasons, moat_src=moat_src,
+                    exit_ev_ebit=exit_mult, tv_nopat=tv / nopat_N if nopat_N else float('nan'), roic_note=roic_note,
+                    nopat0=nopat0, tv=tv, pv_explicit=pv_sum, pv_tv=pv_tv,
                     cash=co.cash, nonop=nonop, ic_op=ic, debt=debt_sub, minority=co.minority, spread=spread),
     )
 
@@ -591,7 +733,7 @@ def excess_return_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
 
     c = cost_of_equity(co, p, scen, warns)
     ke = c["ke"]
-    gT = clamp(p.g_terminal + scen.gT_adj, -0.01, 0.05)
+    gT = clamp(p.g_terminal, -0.01, 0.05)
     gT = _guard_g(gT, ke, warns, "Ke")
 
     bv0 = co.equity
@@ -664,7 +806,7 @@ def reit_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         raise ModelError("Faltan precio o acciones.")
     c = cost_of_equity(co, p, scen, warns)
     ke = c["ke"]
-    gT = clamp(p.g_terminal + scen.gT_adj, -0.01, 0.04)
+    gT = clamp(p.g_terminal, -0.01, 0.04)
     gT = _guard_g(gT, ke, warns, "Ke")
 
     if p.affo_ps_override is not None:
@@ -749,13 +891,126 @@ def sensitivity(co: CompanyData, p: Params, model: str, d_rate=(-0.01, -0.005, 0
         for dg in d_g:
             pp = replace(p, g_terminal=p.g_terminal + dg)
             if model == "FCFF":
-                pp = replace(pp, wacc_override=r0 + dr)
+                pp = replace(pp, wacc_shift=p.wacc_shift + dr)
             else:
                 pp = replace(pp, ke_override=r0 + dr)
             r = value_company(co, pp, model, "Base")
             row.append(r.per_share if r.ok else float("nan"))
         grid.append(row)
     return dict(ok=True, rates=[r0 + d for d in d_rate], gs=[p.g_terminal + d for d in d_g], grid=grid)
+
+
+def field_checks(co: CompanyData, model: str, p: Optional[Params] = None) -> List[dict]:
+    """Control obligatorio por dato importado: qué se usó, si parece razonable y qué revisar.
+    Estado: 'ok' (✅), 'aviso' (⚠️: revisar), 'info' (ℹ️: dato faltante con supuesto conocido)."""
+    out: List[dict] = []
+    p = p or Params()
+
+    def add(campo, valor, estado, nota):
+        out.append(dict(Campo=campo, Valor=valor, Estado=estado, Control=nota))
+
+    rev = co.revenue_ttm or 0.0
+    ebit_m = co.ebit_ttm / rev if rev > 0 else None
+    leases = _leases_included(co, p)
+
+    add("Precio y moneda", f"{co.price:,.2f} {co.currency}", "ok" if co.price > 0 else "aviso",
+        "Moneda y fecha de la cotización: confirmar que el precio es el de la clase de acción correcta.")
+    if co.fin_currency != co.currency:
+        add("Moneda de los estados contables", f"{co.fin_currency} → {co.currency}", "aviso",
+            f"Convertidos a tipo de cambio spot ({co.fx:.4g}): el valor depende de ese tipo de cambio.")
+    else:
+        add("Moneda de los estados contables", co.fin_currency, "ok", "Igual a la moneda de cotización.")
+    if co.reported_shares_m and co.shares_m > 0:
+        diff = abs(co.shares_m / co.reported_shares_m - 1)
+        add("Acciones (implícitas = capitalización ÷ precio)", f"{co.shares_m:,.0f} M",
+            "aviso" if diff > 0.15 else "ok",
+            f"Difieren {diff:.0%} de las reportadas ({co.reported_shares_m:,.0f} M): normal en ADRs, sospechoso si no." if diff > 0.15
+            else "Coinciden con las reportadas (±15 %).")
+    else:
+        add("Acciones (implícitas = capitalización ÷ precio)", f"{co.shares_m:,.0f} M", "info",
+            "Sin acciones reportadas para contrastar.")
+    add("Ingresos TTM", f"{rev:,.0f} M", "ok" if rev > 0 else "aviso",
+        f"Fuente: {co.ttm_source or 'n/d'}" + (f" · al {co.asof}" if co.asof else "") + ". Verificar año fiscal.")
+    if co.asof:
+        try:
+            import datetime as _dt
+            age = (_dt.date.today() - _dt.date.fromisoformat(co.asof)).days
+            add("Antigüedad de los datos contables", f"{age} días", "aviso" if age > 450 else "ok",
+                "Más de 15 meses sin actualizar: puede haber un balance más reciente." if age > 450 else "Dentro de lo esperable.")
+        except Exception:  # noqa: BLE001
+            pass
+
+    if model == "FCFF":
+        if ebit_m is None:
+            add("EBIT (resultado operativo)", f"{co.ebit_ttm:,.0f} M", "aviso", "Sin ingresos para calcular el margen.")
+        else:
+            odd = ebit_m > 0.70 or ebit_m < -0.30
+            add("EBIT (resultado operativo)", f"{co.ebit_ttm:,.0f} M · margen {ebit_m:.1%}", "aviso" if odd else "ok",
+                "Margen fuera de lo habitual: revisá la definición de operating income." if odd
+                else "Margen razonable. Validar que no incluya ganancias extraordinarias.")
+        da_r = co.da_ttm / rev if rev > 0 else 0
+        add("D&A (amortización)", f"{co.da_ttm:,.0f} M", "info" if co.da_ttm == 0 else ("aviso" if da_r > 0.25 else "ok"),
+            "Sin dato: se asume 0 (el FCFF queda subestimado)." if co.da_ttm == 0
+            else ("D&A mayor al 25 % de los ingresos: revisar." if da_r > 0.25 else "Signo normalizado a positivo."))
+        cx_r = co.capex_ttm / rev if rev > 0 else 0
+        add("CapEx", f"{co.capex_ttm:,.0f} M", "info" if co.capex_ttm == 0 else ("aviso" if cx_r > 0.35 else "ok"),
+            "Sin dato: se asume 0 (el valor queda sobrestimado)." if co.capex_ttm == 0
+            else ("CapEx mayor al 35 % de los ingresos: ¿inversión extraordinaria?" if cx_r > 0.35 else "Signo normalizado a positivo."))
+        add("Capital de trabajo (variación)", f"{co.nwc_inv_ttm:,.0f} M", "info" if co.nwc_inv_ttm == 0 else "ok",
+            "Sin dato o cero: se asume 0." if co.nwc_inv_ttm == 0 else "Incremento positivo = consume caja.")
+        if co.tax_rate_eff is None:
+            add("Impuesto efectivo", "n/d", "info", "Sin dato: se usa la tasa marginal del país.")
+        else:
+            odd = not (0.0 <= co.tax_rate_eff <= 0.35)
+            add("Impuesto efectivo", f"{co.tax_rate_eff:.1%}", "aviso" if odd else "ok",
+                "Fuera de 0–35 %: se acotó. Un año atípico no debería usarse mecánicamente." if odd
+                else f"Converge a la marginal del país ({p.marginal_tax:.1%}) en 5 años.")
+        ebitda = co.ebit_ttm + co.da_ttm
+        debt_net = co.debt if leases else max(0.0, co.debt - co.lease_debt)
+        lev = debt_net / ebitda if ebitda > 0 else None
+        add("Deuda", f"{debt_net:,.0f} M" + (" (con arrendamientos)" if leases else " (sin arrendamientos)"),
+            "aviso" if (lev is not None and lev > 6) or (ebitda <= 0 and debt_net > 0) else "ok",
+            "Deuda/EBITDA > 6x o EBITDA ≤ 0: riesgo financiero alto." if (lev is not None and lev > 6) or (ebitda <= 0 and debt_net > 0)
+            else "Corto + largo plazo. Revisar arrendamientos.")
+        liquid = co.cash + (co.non_op_assets if p.include_nonop else 0.0)
+        add("Caja e inversiones no operativas", f"{co.cash:,.0f} M + {co.non_op_assets:,.0f} M",
+            "aviso" if co.market_cap_m > 0 and liquid > 0.6 * co.market_cap_m else "ok",
+            "Superan el 60 % de la capitalización: confirmar que no haya doble conteo." if co.market_cap_m > 0 and liquid > 0.6 * co.market_cap_m
+            else "Se suman al valor de la empresa: confirmar que no estén ya dentro del EBIT.")
+        if not co.interest_expense_ttm or co.interest_expense_ttm <= 0:
+            add("Intereses pagados", "n/d", "info", "Sin dato: costo de la deuda = tasa libre de riesgo + 1,5 %.")
+        else:
+            add("Intereses pagados", f"{co.interest_expense_ttm:,.0f} M", "ok", "Base de la calificación sintética.")
+    if model in ("FCFF", "ER") or co.equity is not None:
+        eq_ok = co.equity is not None and co.equity > 0
+        add("Patrimonio contable", "n/d" if co.equity is None else f"{co.equity:,.0f} M", "ok" if eq_ok else "aviso",
+            "Revisar patrimonio común vs total (los minoritarios van aparte)." if eq_ok
+            else "Patrimonio ausente o ≤ 0 (típico con recompras fuertes): el ROIC y el ROE no son confiables.")
+    if model == "ER":
+        add("Resultado neto TTM", "n/d" if co.ni_ttm is None else f"{co.ni_ttm:,.0f} M",
+            "aviso" if co.ni_ttm is None else "ok", "Base del ROE; normalizar partidas extraordinarias.")
+    if model == "REIT":
+        add("AFFO", "estimado", "info",
+            "Yahoo no informa AFFO: se estima desde el FFO. Lo ideal es cargar el reportado por la compañía.")
+    nh = len([x for x in co.revenue_hist if x])
+    add("Historia de ingresos", f"{nh} años", "aviso" if nh < 3 else "ok",
+        "Menos de 3 años: la mediana histórica y el foso automático son poco confiables." if nh < 3 else "Suficiente para la mediana y la estabilidad del margen.")
+    if co.beta is None:
+        add("Beta de la acción", "n/d", "info", "Sin beta: se usa la de la industria (o 1,0).")
+    else:
+        add("Beta de la acción", f"{co.beta:.2f}", "aviso" if co.beta <= 0 or co.beta > 2.5 else "ok",
+            "Beta ≤ 0 o muy alta: no es confiable." if co.beta <= 0 or co.beta > 2.5
+            else "Se usa la de la industria si hay datos; esta queda como referencia.")
+    add("Tasa libre de riesgo", f"{co.rf:.2%}", "ok" if 0.01 <= co.rf <= 0.12 else "aviso",
+        "Bono del Tesoro de EE.UU. a 10 años." if 0.01 <= co.rf <= 0.12 else "Fuera de rango: revisar.")
+    if model in ("FCFF", "REIT"):
+        have = co.rev_g_y0 is not None or co.rev_g_y1 is not None
+        na = co.n_analysts
+        add("Estimaciones de analistas", f"{na} analistas" if na else ("sí" if have else "n/d"),
+            "info" if not have else ("aviso" if (na is not None and na < 3) else "ok"),
+            "Sin estimaciones: crecimiento = mediana histórica (confianza menor)." if not have
+            else ("Pocos analistas (< 3): estimación poco representativa." if (na is not None and na < 3) else "Crecimiento de años 1–2 según analistas."))
+    return out
 
 
 def data_checks(co: CompanyData) -> List[str]:

@@ -1,6 +1,7 @@
 """Promedios por industria de Damodaran (enero 2026): US y Global. Generado desde sus planillas."""
 ERP_IMPLIED_2025 = 0.0423   # prima implícita de EE.UU. a fin de 2025 (Damodaran, histimpl)
 DATE = "enero 2026"
+DATE_ISO = "2026-01-01"   # fecha de las tablas de Damodaran (la app avisa si pasaron más de 12 meses)
 IND = {
 "Advertising": {
 "us": {
@@ -2745,4 +2746,7 @@ def attach(co, model, manual_name=None):
     fin = model == "ER"
     return replace(co, ind_name=name, ind_region=region,
                    ind_ubeta=None if fin else ref.get("ubeta"),
-                   ind_beta_lev=ref.get("beta") if fin else None), name, how
+                   ind_beta_lev=ref.get("beta") if fin else None,
+                   ind_roc=None if fin else ref.get("roc"),
+                   ind_margin=None if fin else ref.get("margin"),
+                   ind_de=None if fin else ref.get("de")), name, how
