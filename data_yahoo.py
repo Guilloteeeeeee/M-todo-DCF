@@ -14,6 +14,7 @@ Reglas de datos:
 from __future__ import annotations
 
 import math
+import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -501,6 +502,8 @@ def search_profile(sym: str) -> dict:
                 out = {}
                 sec = q.get("sectorDisp") or q.get("sector")
                 ind = q.get("industryDisp") or q.get("industry")
+                if ind:   # el buscador usa raya larga ("Utilities—Regulated Electric"); el resto del código espera "Utilities - Regulated Electric"
+                    ind = re.sub(r"\s*[—–]\s*", " - ", str(ind))
                 nm = q.get("longname") or q.get("shortname")
                 if sec:
                     out["sector"] = str(sec)
@@ -514,12 +517,25 @@ def search_profile(sym: str) -> dict:
     return {}
 
 
-def is_degraded(co: CompanyData) -> bool:
-    """Carga incompleta: falta industria o país (o el nombre). Con eso el resultado es menos confiable
-    (sin beta ni referencias del sector, impuesto por defecto, arrendamientos mal tratados)."""
+def missing_fields(co: CompanyData) -> List[str]:
+    """Qué datos de perfil no llegaron (lista vacía = completo). No aplica a fondos/ETF."""
     if co.quote_type and co.quote_type != "EQUITY":
-        return False
-    return not (co.industry and co.country and co.name and co.name.upper() != (co.ticker or "").upper())
+        return []
+    out = []
+    if not co.sector:
+        out.append("sector")
+    if not co.industry:
+        out.append("industria")
+    if not co.country:
+        out.append("país")
+    if not co.name or co.name.upper() == (co.ticker or "").upper():
+        out.append("nombre")
+    return out
+
+
+def is_degraded(co: CompanyData) -> bool:
+    """Carga incompleta (falta algún dato de perfil). Una carga así no se guarda en la caché, para que reintentar consulte de nuevo."""
+    return bool(missing_fields(co))
 
 
 def get_risk_free() -> Tuple[float, bool]:
@@ -631,8 +647,8 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
         warns.append(f"No pude leer la tasa del Tesoro a 10 años: se usó Rf = {RF_FALLBACK:.2%}.")
     if alt:
         warns.append("Sector/industria/estimaciones/beta completados con una fuente alternativa (yfinance / buscador de Yahoo).")
-    if is_degraded(co):
-        miss = [n for n, v in (("sector", co.sector), ("industria", co.industry), ("país", co.country), ("nombre", co.name if co.name.upper() != co.ticker.upper() else "")) if not v]
+    miss = missing_fields(co)
+    if miss:
         warns.append("🔴 Carga incompleta: no pude leer " + ", ".join(miss) + " de Yahoo (ni con reintentos ni con fuentes alternativas)"
                      + (f". Módulos que no respondieron: {', '.join(failed)}" if failed else "") + ".")
     return co, warns

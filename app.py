@@ -58,7 +58,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.19 · 16/10/2026"
+APP_VERSION = "v2.19.2 · 16/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -305,11 +305,23 @@ except Exception as e:  # noqa: BLE001
     st.error(f"No pude cargar **{sym}**: {e}")
     st.stop()
 
-if data_yahoo.is_degraded(co):
-    st.error("🔴 **Resultado degradado: no pude leer todos los datos de la empresa en Yahoo** "
-             "(sector, industria, país o nombre). Sin industria no hay beta ni referencias del sector; sin país se usa un impuesto "
-             "marginal de 25 % y los arrendamientos se cuentan como deuda. Probá de nuevo en unos minutos: esta carga no se guarda, "
-             "así que el reintento vuelve a consultar. Detalle en los avisos de más abajo.")
+_miss = data_yahoo.missing_fields(co)
+if _miss:
+    _effects = {
+        "industria": "sin industria no hay beta ni referencias del sector (el WACC y el foso quedan menos confiables)",
+        "país": "sin país se usa un impuesto marginal de 25 % (supuesto), prima de riesgo país 0 y los arrendamientos se cuentan como deuda",
+        "sector": "sin sector se pierde el aviso de industrias cíclicas",
+        "nombre": "sin nombre solo se muestra el ticker",
+    }
+    _list = _miss[0] if len(_miss) == 1 else ", ".join(_miss[:-1]) + " y " + _miss[-1]
+    _detail = "; ".join(_effects[m] for m in _miss) + "."
+    _retry = " Probá de nuevo en unos minutos: esta carga no se guarda, así que el reintento vuelve a consultar. Detalle en los avisos de más abajo."
+    if "industria" in _miss:
+        st.error(f"🔴 **Resultado degradado: no pude leer {_list} de la empresa en Yahoo.** {_detail[0].upper() + _detail[1:]}{_retry}")
+    else:
+        _tip = (" Si la empresa no es de EE.UU., cargá la prima de riesgo país en la barra lateral." if "país" in _miss else "")
+        st.warning(f"🟡 **Dato incompleto: no pude leer {_list} de la empresa en Yahoo.** "
+                   f"{_detail[0].upper() + _detail[1:]} El efecto en la valuación es acotado.{_tip}{_retry}")
 
 if crp_auto:
     crp, crp_note = country_crp(co.country)

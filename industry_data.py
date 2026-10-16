@@ -2705,7 +2705,8 @@ _MAP = [
 
 
 def map_industry(yahoo_industry: str):
-    s = (yahoo_industry or "").strip().lower()
+    import re
+    s = re.sub(r"\s*[—–]\s*", " - ", (yahoo_industry or "").strip().lower())   # raya larga -> " - "
     if not s:
         return None
     for key, name in _MAP:
