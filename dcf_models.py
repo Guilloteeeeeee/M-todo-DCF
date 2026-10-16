@@ -53,6 +53,7 @@ class CompanyData:
     shares_m: float = 0.0              # acciones implícitas (mkt cap / precio), en millones
     reported_shares_m: Optional[float] = None
     market_cap_m: float = 0.0
+    cap_estimated: bool = False        # True: Yahoo no dio la capitalización y se estimó acciones ordinarias × precio (riesgo de ADR mal contado)
 
     beta: Optional[float] = None
     rf: float = 0.0425
@@ -93,6 +94,10 @@ class CompanyData:
     # --- REIT
     gains_adj_ttm: float = 0.0         # ajuste a NI por ganancias/pérdidas en venta de activos (signo CF)
 
+    # --- I+D (se capitaliza como activo, Damodaran cap. 11)
+    rd_ttm: float = 0.0                # gasto en I+D de los últimos 12 meses (millones, moneda de cotización)
+    rd_hist: List[Optional[float]] = field(default_factory=list)   # I+D anual, antiguo -> reciente (hasta 4 años)
+
     # --- referencia de industria (Damodaran); lo completa la app
     ind_name: str = ""
     ind_region: str = ""
@@ -118,6 +123,8 @@ class Params:
     rf: Optional[float] = None
     beta: Optional[float] = None
     wacc_override: Optional[float] = None
+    capitalize_rd: bool = True              # capitalizar el gasto en I+D (Damodaran, cap. 11) con los años que entrega Yahoo
+    survival_adj: bool = True               # ajuste por probabilidad de quiebra (Damodaran, cap. 8) para calificación sintética peor que BBB
     ke_override: Optional[float] = None
     marginal_tax: float = 0.25
     margin_mode: str = "median"        # median | ttm | manual
@@ -457,6 +464,18 @@ def margin_options(co: CompanyData) -> Dict[str, Optional[float]]:
     return {"ttm": m0, "median": _med(hist + [m0]) if hist else m0, "analysts": analyst_margin(co, m0)}
 
 
+MARGIN_SPREAD = 0.15   # escenarios pesimista/optimista: margen objetivo ∓15 % (relativo; antes ∓2 pp absolutos)
+
+
+def ttm_distorted(co: CompanyData, m0: float, mt_base: float) -> bool:
+    """El margen del TTM está 8 pp o más por debajo del margen objetivo y los ingresos no caen (más de 3 %):
+    probablemente un cargo extraordinario de un año y no un deterioro del negocio."""
+    if m0 is None or m0 <= 0 or mt_base - m0 < 0.08:
+        return False
+    prev = next((r for r in reversed(co.revenue_hist) if r), None)
+    return prev is None or co.revenue_ttm >= 0.97 * prev
+
+
 def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float, str]:
     """(margen inicial TTM, margen objetivo del escenario, descripción)."""
     if co.revenue_ttm <= 0:
@@ -469,8 +488,16 @@ def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float,
     if p.margin_mode == "manual" and p.margin_manual is not None:
         mt, desc = p.margin_manual, "manual"
     elif m0 <= 0:
-        # Empresa con pérdida operativa: no hay margen propio útil; se converge al margen típico de su industria.
-        if co.ind_margin is not None and co.ind_margin > 0:
+        # Empresa con pérdida operativa. Damodaran (cap. 5 y 8): la empresa joven converge al margen de su industria;
+        # la que ya fue rentable se recupera hacia SU propio nivel de años buenos (ej.: Las Vegas Sands vuelve al 17 % de 2006).
+        pos = [h for h in hist if h > 0]
+        if len(pos) >= 2:
+            own = _med(pos)
+            if co.ind_margin is not None and co.ind_margin > 0:
+                own = min(own, 1.5 * co.ind_margin)          # tope: no volver a un pico irrepetible
+            mt, desc = own, (f"mediana de los {len(pos)} años rentables de la propia empresa (recuperación a su nivel histórico, "
+                             "con tope de 1,5× el margen de su industria)")
+        elif co.ind_margin is not None and co.ind_margin > 0:
             mt, desc = co.ind_margin, f"promedio de la industria {co.ind_name} (la empresa tiene pérdida operativa)"
         else:
             raise ModelError("EBIT TTM ≤ 0 y no hay datos de industria para estimar un margen objetivo. "
@@ -483,56 +510,96 @@ def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float,
         mt = _med(hist + [m0]) if hist else m0
         desc = f"mediana {len(hist)} años + TTM" if hist else "TTM (sin historia)"
     if scen.m_rule == "pess":
-        mt = min(max(mt - 0.02, 0.5 * mt), m0 if m0 > 0 else mt)
+        if m0 > 0 and ttm_distorted(co, m0, mt):
+            # El TTM parece un año extraordinario: el piso pesimista no se ancla a él.
+            mt = mt * (1 - MARGIN_SPREAD)
+            desc += " · TTM probablemente distorsionado: el pesimista no se ancla a él"
+        else:
+            mt = min(mt * (1 - MARGIN_SPREAD), m0 if m0 > 0 else mt)
     elif scen.m_rule == "opt":
-        mt = max(min(mt + 0.02, 1.5 * mt), m0)
+        mt = max(mt * (1 + MARGIN_SPREAD), m0)
     return m0, mt, desc
 
 
 # ----------------------------------------------------------------------------
 # Foso (moat) automático
 # ----------------------------------------------------------------------------
+GRAY_ZONE = 0.01   # tolerancia del criterio 1: hasta 1 pp por debajo del umbral, con los otros dos criterios cumplidos, cuenta como Estrecho
+
+PRICE_TAKER_INDUSTRIES = {   # el libro: las de materias primas son precio-aceptantes y hasta las mejores sufren el ciclo bajista
+    "Oil/Gas (Integrated)", "Oil/Gas (Production and Exploration)", "Oilfield Svcs/Equip.", "Oil/Gas Distribution",
+    "Coal & Related Energy", "Metals & Mining", "Precious Metals", "Steel", "Farming/Agriculture", "Paper/Forest Products",
+    "Chemical (Basic)", "Air Transport"}
+
+
 def classify_moat(co: CompanyData, wacc: float, roic_now: Optional[float], loss: bool,
                   wacc_ref: Optional[float] = None) -> Tuple[str, List[str]]:
-    """Estimación propia del foso con tres criterios (cada uno suma 1):
-      1. Retorno sobre capital (ROIC) ≥ el mayor entre el ROC del sector y el WACC del SECTOR + 2 pp
-         (sin datos del sector: WACC de la empresa + 8 pp). Se usa el WACC del sector y no el de la empresa porque el foso
-         es una propiedad de largo plazo y el WACC propio incluye situaciones financieras pasajeras (ej. deuda cara).
-      2. Margen EBIT (mediana de 4 años + TTM) ≥ margen del sector + 5 pp.
-      3. Margen estable: rango (máx − mín) ≤ 4 pp en los últimos años y siempre positivo.
-    Amplio = 2 o más, con el ROIC obligatorio · Estrecho = al menos 1 · Ninguno = 0."""
+    """Estimación propia del foso. Para Damodaran (cap. 3) una ventaja competitiva es un retorno sobre el capital que se
+    mantiene por encima del costo del capital: por eso sin exceso de retorno NO hay foso, y los otros dos criterios
+    solo distinguen entre foso Estrecho y Amplio.
+      1. Exceso de retorno (obligatorio): ROIC ≥ WACC del sector + 5 pp. En sectores de retorno típico bajo (ej.: utilities) el
+         umbral es el menor entre ese y el ROC del sector (con piso WACC + 2 pp), para no exigir lo que el sector nunca da.
+      2. Persistencia: los últimos tres márgenes EBIT (2 años + TTM) siguen en al menos 80 % de la mediana propia.
+         Un TTM que parece un año extraordinario no cuenta.
+      3. Mejor que sus pares: margen mediano ≥ margen del sector, o ROIC ≥ ROC del sector
+         (sin datos del sector: ROIC ≥ WACC + 10 pp).
+    Amplio = los tres · Estrecho = solo el 1 (o el 1 y uno de los otros) · Ninguno = no cumple el 1.
+    Zona gris: ROIC hasta 1 pp bajo el umbral del criterio 1 pero con los criterios 2 y 3 cumplidos = Estrecho."""
     if loss:
         return "Ninguno", ["Pérdida operativa: los números no muestran ventaja competitiva."]
     reasons: List[str] = []
     hits = {1: False, 2: False, 3: False}
+    gray = False
+    w_ref = wacc_ref if wacc_ref is not None else wacc
     if roic_now is None:
-        reasons.append("1) ROIC: sin capital invertido utilizable, no se evalúa.")
+        reasons.append("1) Exceso de retorno: sin capital invertido utilizable, no se evalúa.")
     else:
+        thr, how = w_ref + 0.05, "WACC del sector + 5 pp"
         if co.ind_roc is not None:
-            w_ref = wacc_ref if wacc_ref is not None else wacc
-            thr, how = max(co.ind_roc, w_ref + 0.02), "el mayor entre el ROC del sector y el WACC del sector + 2 pp"
-        else:
-            thr, how = wacc + 0.08, "WACC + 8 pp (sin datos del sector)"
+            soft = max(co.ind_roc, w_ref + 0.02)
+            if soft < thr:
+                thr, how = soft, "sector de retorno bajo: el ROC del sector, con piso WACC + 2 pp"
         hits[1] = roic_now >= thr
-        reasons.append(f"1) ROIC {roic_now:.1%} {'≥' if hits[1] else '<'} {thr:.1%} ({how}): {'sí' if hits[1] else 'no'}.")
+        gray = (not hits[1]) and roic_now >= thr - GRAY_ZONE
+        reasons.append(f"1) ROIC {roic_now:.1%} {'≥' if hits[1] else '<'} {thr:.1%} ({how}): {'sí' if hits[1] else ('casi (zona gris, hasta 1 pp por debajo)' if gray else 'no')}.")
     ms = [e / r for r, e in list(zip(co.revenue_hist, co.ebit_hist))[-4:] if r and e is not None and r > 0]
+    ttm_ignored = False
     if co.revenue_ttm > 0:
-        ms.append(co.ebit_ttm / co.revenue_ttm)
+        m_ttm = co.ebit_ttm / co.revenue_ttm
+        if ms and ttm_distorted(co, m_ttm, _med(ms + [m_ttm])):
+            ttm_ignored = True            # año extraordinario: no cuenta para juzgar el foso
+        else:
+            ms.append(m_ttm)
     med = _med(ms) if ms else None
-    if co.ind_margin is not None and med is not None:
-        hits[2] = med >= co.ind_margin + 0.05
-        reasons.append(f"2) Margen EBIT {med:.1%} {'≥' if hits[2] else '<'} {co.ind_margin + 0.05:.1%} "
-                       f"(sector {co.ind_margin:.1%} + 5 pp): {'sí' if hits[2] else 'no'}.")
+    if len(ms) >= 3 and med is not None and med > 0:
+        recent = min(ms[-3:])
+        hits[2] = recent >= 0.8 * med
+        reasons.append(f"2) Persistencia: el menor de los últimos tres márgenes ({recent:.1%}) {'≥' if hits[2] else '<'} 80 % de la "
+                       f"mediana propia ({0.8 * med:.1%}): {'sí' if hits[2] else 'no'}.")
+        if ttm_ignored:
+            reasons.append("(El margen del TTM parece un año extraordinario y no se usa para juzgar el foso.)")
     else:
-        reasons.append("2) Margen vs sector: sin datos del sector, no se evalúa.")
-    if len(ms) >= 3:
-        rng = max(ms) - min(ms)
-        hits[3] = rng <= 0.04 and min(ms) > 0
-        reasons.append(f"3) Rango del margen {rng:.1%} {'≤' if hits[3] else '>'} 4 pp: {'sí' if hits[3] else 'no'}.")
+        reasons.append("2) Persistencia del margen: faltan años de historia o el margen no es positivo, no se evalúa.")
+    if co.ind_roc is not None and co.ind_margin is not None and med is not None and roic_now is not None:
+        by_margin, by_roic = med >= co.ind_margin, roic_now >= co.ind_roc
+        hits[3] = by_margin or by_roic
+        reasons.append(f"3) Frente a su sector: margen {med:.1%} vs {co.ind_margin:.1%} ({'mejor' if by_margin else 'peor'}) · "
+                       f"ROIC {roic_now:.1%} vs ROC {co.ind_roc:.1%} ({'mejor' if by_roic else 'peor'}): {'sí' if hits[3] else 'no'}.")
+    elif roic_now is not None:
+        hits[3] = roic_now >= w_ref + 0.10
+        reasons.append(f"3) Sin datos del sector: ROIC {roic_now:.1%} {'≥' if hits[3] else '<'} WACC + 10 pp ({w_ref + 0.10:.1%}): "
+                       f"{'sí' if hits[3] else 'no'}.")
     else:
-        reasons.append("3) Estabilidad del margen: faltan años de historia, no se evalúa.")
-    n = sum(hits.values())
-    label = "Amplio" if (hits[1] and n >= 2) else ("Estrecho" if n >= 1 else "Ninguno")
+        reasons.append("3) Frente a su sector: no se evalúa.")
+    label = "Ninguno" if not hits[1] else ("Amplio" if (hits[2] and hits[3]) else "Estrecho")
+    if gray and hits[2] and hits[3]:
+        label = "Estrecho"
+        reasons.append("Zona gris: el ROIC quedó a menos de 1 pp del umbral y cumple persistencia y comparación con sus pares, así que se "
+                       "clasifica Estrecho (nunca Amplio) en lugar de dejarlo sin foso por una diferencia mínima.")
+    if label == "Amplio" and co.ind_name in PRICE_TAKER_INDUSTRIES:
+        label = "Estrecho"
+        reasons.append("Tope: productor de materias primas (o aerolínea), precio-aceptante: su retorno depende del ciclo del precio y no de una "
+                       "ventaja propia, así que el foso se limita a Estrecho (Damodaran, cap. 10).")
     return label, reasons
 
 
@@ -581,9 +648,109 @@ def terminal_growth_default(rf: float) -> float:
     return clamp(rf - 0.01, 0.035, 0.04)
 
 
+# ----------------------------------------------------------------------------
+# Riesgo de quiebra (Damodaran, cap. 8: valor como negocio en marcha × (1 − probabilidad de quiebra))
+# ----------------------------------------------------------------------------
+# Spread de la tabla sintética -> calificación; probabilidad acumulada de quiebra a 10 años por calificación (libro, tabla 8.2).
+_RATING_BY_SPREAD = [(.0040, "AAA"), (.0055, "AA"), (.0070, "A+"), (.0078, "A"), (.0089, "A-"), (.0111, "BBB"), (.0138, "BB+"),
+                     (.0184, "BB"), (.0275, "B+"), (.0321, "B"), (.0509, "B-"), (.0885, "CCC"), (.1261, "CC"), (.16, "C"), (.19, "D")]
+_DEFAULT_10Y = {"AAA": .0007, "AA": .0051, "A+": .0057, "A": .0066, "A-": .05, "BBB": .0754, "BB+": .136, "BB": .1963,
+                "B+": .2825, "B": .368, "B-": .4212, "CCC": .5902, "CC": .666, "C": .8103, "D": .8716}
+_INVESTMENT_GRADE_OR_BBB = ("AAA", "AA", "A+", "A", "A-", "BBB")
+
+
+def default_risk(co: CompanyData, mt_base: float) -> Optional[Tuple[float, str, float]]:
+    """(probabilidad de quiebra a 10 años, calificación sintética, cobertura) o None si no se puede estimar.
+    Cobertura = EBIT / intereses; si la empresa pierde plata se usa el EBIT normalizado (ingresos × margen objetivo)."""
+    if not co.interest_expense_ttm or co.interest_expense_ttm <= 0:
+        return None
+    ebit = co.ebit_ttm if co.ebit_ttm > 0 else co.revenue_ttm * mt_base
+    cov = ebit / co.interest_expense_ttm
+    sp = synthetic_spread(cov, co.market_cap_m >= 5000)
+    rating = next((r for v, r in _RATING_BY_SPREAD if sp <= v + 1e-9), "D")
+    return _DEFAULT_10Y[rating], rating, cov
+
+
+# ----------------------------------------------------------------------------
+# Etapa del ciclo de vida (Damodaran, tabla 12.1): qué factores mirar primero
+# ----------------------------------------------------------------------------
+CYCLICAL_INDUSTRIES = {   # cíclicas (ligadas a la economía) y de materias primas, según las industrias de Damodaran
+    "Auto & Truck", "Auto Parts", "Homebuilding", "Building Materials", "Construction Supplies", "Engineering/Construction",
+    "Air Transport", "Shipbuilding & Marine", "Transportation", "Trucking", "Hotel/Gaming", "Recreation", "Furn/Home Furnishings",
+    "Real Estate (Development)", "Rubber& Tires", "Machinery", "Steel", "Chemical (Basic)", "Chemical (Diversified)",
+    "Paper/Forest Products", "Semiconductor Equip", "Retail (Automotive)",
+    "Oil/Gas (Integrated)", "Oil/Gas (Production and Exploration)", "Oilfield Svcs/Equip.", "Oil/Gas Distribution",
+    "Coal & Related Energy", "Metals & Mining", "Precious Metals", "Farming/Agriculture", "Green & Renewable Energy"}
+LIFECYCLE_FACTORS = {
+    "Con pérdidas y creciendo": "Crecimiento de los ingresos · margen objetivo · probabilidad de supervivencia",
+    "En crecimiento": "Crecimiento escalable · sostenibilidad de los márgenes",
+    "Madura": "Debilidad operativa y financiera · cambio del equipo gestor",
+    "En declive o dificultades": "Valor como negocio en marcha · probabilidad y consecuencias de la quiebra",
+    "Cíclica o de materias primas": "Beneficios normalizados · precio normalizado de la materia prima · crecimiento a largo plazo",
+    "Servicios financieros": "Riesgo de los fondos propios · calidad del crecimiento (ROE) · colchón de capital regulatorio",
+    "Inmobiliaria (REIT)": "Flujo recurrente (AFFO) · deuda · calidad del crecimiento",
+}
+
+
+def lifecycle_info(co: CompanyData, model: str, g1: Optional[float]) -> Tuple[str, str]:
+    """Etapa aproximada de la empresa y los factores clave que, según Damodaran, más pesan en su valor."""
+    if model == "ER":
+        lab = "Servicios financieros"
+    elif model == "REIT":
+        lab = "Inmobiliaria (REIT)"
+    else:
+        prev = next((r for r in reversed(co.revenue_hist) if r), None)
+        hist = [r for r in co.revenue_hist if r]
+        yoy = (co.revenue_ttm / prev - 1) if (prev and co.revenue_ttm > 0) else None
+        cagr = ((hist[-1] / hist[-3]) ** 0.5 - 1) if (len(hist) >= 3 and hist[-3] > 0) else None
+        shrinking = (yoy is not None and yoy <= -0.03) or (cagr is not None and cagr <= -0.02)
+        if co.ebit_ttm <= 0 and (g1 or 0) >= 0.10:
+            lab = "Con pérdidas y creciendo"
+        elif co.ind_name in CYCLICAL_INDUSTRIES:
+            lab = "Cíclica o de materias primas"
+        elif co.ebit_ttm <= 0 or shrinking:
+            lab = "En declive o dificultades"
+        elif (g1 or 0) >= 0.12:
+            lab = "En crecimiento"
+        else:
+            lab = "Madura"
+    return lab, LIFECYCLE_FACTORS[lab]
+
+
+# ----------------------------------------------------------------------------
+# Capitalización del gasto en I+D (Damodaran, cap. 11)
+# ----------------------------------------------------------------------------
+RD_LIFE = 4        # años de vida amortizable: los que entrega Yahoo (el libro usa 10 en farmacéuticas, pero no hay tanta historia)
+
+
+def apply_rd(co: CompanyData, p: Params) -> Tuple[CompanyData, Optional[dict]]:
+    """Trata el I+D como inversión: se suma al EBIT del año y se resta su amortización lineal; el I+D no amortizado entra
+    como activo en el patrimonio y el capital invertido. Devuelve (empresa ajustada, detalle) o (empresa, None) si no aplica."""
+    prior = [x for x in reversed(co.rd_hist or []) if x is not None and x >= 0]      # más reciente primero
+    if not p.capitalize_rd or co.rd_ttm is None or co.rd_ttm <= 0 or len(prior) < 3 or co.revenue_ttm <= 0:
+        return co, None
+    prior = prior[:RD_LIFE]
+    while len(prior) < RD_LIFE:
+        prior.append(prior[-1])                       # año faltante: se repite el más antiguo (supuesto conservador)
+    amort = sum(prior) / RD_LIFE
+    asset = co.rd_ttm + sum(prior[k - 1] * (1 - k / RD_LIFE) for k in range(1, RD_LIFE))
+    net = co.rd_ttm - amort
+    shift = net / co.revenue_ttm                      # el mismo ajuste en puntos de margen se aplica a los años anteriores
+    ebit_hist = [(e + shift * r) if (e is not None and r) else e for r, e in zip(co.revenue_hist, co.ebit_hist)]
+    co2 = replace(co, ebit_ttm=co.ebit_ttm + net, ebit_hist=ebit_hist,
+                  equity=(co.equity + asset) if co.equity is not None else None,
+                  invested_capital=(co.invested_capital + asset) if co.invested_capital is not None else None)
+    return co2, dict(rd=co.rd_ttm, amort=amort, net=net, asset=asset, shift=shift)
+
+
 def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     warns: List[str] = []
     N = int(clamp(p.horizon, 5, 20))
+    co, rd_info = apply_rd(co, p)
+    if rd_info:
+        warns.append(f"I+D capitalizado (Damodaran, cap. 11; vida {RD_LIFE} años porque Yahoo no entrega más historia): EBIT + {rd_info['rd']:,.0f} "
+                     f"de I+D − {rd_info['amort']:,.0f} de amortización = {rd_info['net']:+,.0f} M; se suman {rd_info['asset']:,.0f} M de activo "
+                     "de I+D al capital invertido. El margen y el ROIC se comparan con promedios de industria que pueden no estar ajustados por I+D.")
     loss = co.ebit_ttm <= 0
     if co.shares_m <= 0 or co.price <= 0:
         raise ModelError("Faltan precio o acciones.")
@@ -593,6 +760,12 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         _, m_ref, _ = margin_target(co, p, replace(scen, m_rule="base"))
         warns.append(f"La empresa tiene pérdida operativa (EBIT TTM ≤ 0): el valor supone que el margen llega a "
                      f"{m_ref:.1%} ({m_desc}). Es un escenario, no una estimación: revisalo con cuidado.")
+
+    if not loss:
+        _, m_med, _ = margin_target(co, p, replace(scen, m_rule="base"))
+        if ttm_distorted(co, m0, m_med):
+            warns.append(f"El margen del TTM ({m0:.1%}) está {(m_med - m0) * 100:.0f} pp bajo el objetivo ({m_med:.1%}) y los ingresos no caen: "
+                         "puede ser un cargo extraordinario de un año. El escenario pesimista no se ancla al TTM; revisalo.")
 
     c = cost_of_capital(co, p, scen, warns)
     wacc, ke = c["wacc"], c["ke"]
@@ -711,6 +884,17 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         warns.append(f"Las inversiones en otras empresas ({nonop:,.0f} M) pesan más del 15 % de la capitalización y se suman a valor contable (puede diferir del de mercado).")
     per_share_raw = equity / co.shares_m
     per_share = max(0.0, per_share_raw)                  # responsabilidad limitada: una acción no vale menos que cero
+    per_share_going = per_share
+    p_default, rating, cov_def = 0.0, "", None
+    if p.survival_adj and not _stable_credit(co):
+        _, mt_ref, _ = margin_target(co, p, replace(scen, m_rule="base"))   # misma probabilidad en los tres escenarios
+        dr = default_risk(co, mt_ref)
+        if dr is not None and dr[1] not in _INVESTMENT_GRADE_OR_BBB:
+            p_default, rating, cov_def = dr
+            per_share = per_share_going * (1 - p_default)
+            warns.append(f"Ajuste por riesgo de quiebra (Damodaran, cap. 8): calificación sintética {rating} (cobertura {cov_def:.1f}×), "
+                         f"probabilidad de quiebra a 10 años {p_default:.0%}. Valor como negocio en marcha {per_share_going:,.2f} × (1 − {p_default:.0%}) "
+                         f"= {per_share:,.2f}; en una quiebra se supone que el accionista no recibe nada.")
     tv_share = pv_tv / ev if ev > 0 else float("nan")
 
     exit_mult = tv / ebit_N if ebit_N > 0 else float("nan")
@@ -733,7 +917,9 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
                     moat_label=moat_label, moat_reasons=moat_reasons, moat_src=moat_src,
                     exit_ev_ebit=exit_mult, tv_nopat=tv / nopat_N if nopat_N else float('nan'), roic_note=roic_note,
                     nopat0=nopat0, tv=tv, pv_explicit=pv_sum, pv_tv=pv_tv,
-                    cash=co.cash, nonop=nonop, ic_op=ic, debt=debt_sub, minority=co.minority, spread=spread),
+                    cash=co.cash, nonop=nonop, ic_op=ic, debt=debt_sub, minority=co.minority, spread=spread,
+                    p_default=p_default, rating=rating, per_share_going=per_share_going,
+                    rd_net=(rd_info or {}).get('net'), rd_asset=(rd_info or {}).get('asset')),
     )
 
 
@@ -893,7 +1079,10 @@ MODEL_FUNCS = {"FCFF": fcff_value, "ER": excess_return_value, "REIT": reit_value
 def value_company(co: CompanyData, p: Params, model: str, scen_name: str) -> ValResult:
     scen = SCENARIOS[scen_name]
     try:
-        return MODEL_FUNCS[model](co, p, scen)
+        res = MODEL_FUNCS[model](co, p, scen)
+        if res.ok:
+            res.extras["lifecycle"], res.extras["lifecycle_factors"] = lifecycle_info(co, model, res.extras.get("g1"))
+        return res
     except ModelError as e:
         return ValResult(model=model, scenario=scen_name, ok=False, error=str(e))
 

@@ -58,7 +58,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.20 · 16/10/2026"
+APP_VERSION = "v2.24 · 16/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -222,8 +222,8 @@ with st.sidebar:
         crp_manual = st.number_input("Prima de riesgo país (%)", 0.0, 30.0, 0.0, 0.25, key=K("crpman")) / 100
     moat = st.selectbox("Ventaja competitiva (moat)", ["Automático"] + list(MOAT_SPREADS), key=K("moat"),
                         help="Cuánto por encima del costo del capital puede seguir ganando la empresa sobre el capital que reinvierte, "
-                             "para siempre. Automático: la app lo estima con tres criterios (retorno sobre capital, margen frente al sector "
-                             "y estabilidad del margen); abajo del resultado ves las razones. Podés forzar Ninguno / Estrecho / Amplio. "
+                             "para siempre. Automático: la app lo estima con tres criterios (exceso de retorno sobre el costo del capital, persistencia del margen "
+                             "y comparación con sus pares); abajo del resultado ves las razones. Podés forzar Ninguno / Estrecho / Amplio. "
                              "Es el supuesto que más mueve el valor.")
     mos = st.slider("Margen de seguridad deseado (%)", 0, 50, 21, key=K("mos"),
                     help="Descuento que exigís sobre el valor del escenario Base para considerar comprar. Por defecto 21 % (criterio de Graham). Es fijo: lo elegís vos.") / 100
@@ -265,6 +265,12 @@ with st.sidebar:
                                    help="Beta promedio de las empresas del sector, ajustada por la deuda de esta empresa. Es mucho más "
                                         "estable que la beta de una sola acción (ej.: 0,29 en KO). Si la desmarcás o no hay datos "
                                         "del sector, se usa la de la acción con ajuste de Blume.")
+        cap_rd = st.checkbox("Capitalizar el gasto en I+D (Damodaran)", value=True, key=K("caprd"),
+                             help="Trata el I+D como inversión (activo que se amortiza) y no como gasto: sube el resultado operativo y el capital "
+                                  "invertido de farmacéuticas y tecnológicas. Usa los años de historia que entrega Yahoo (4). Sin dato de I+D no hace nada.")
+        surv_adj = st.checkbox("Ajustar por riesgo de quiebra (Damodaran)", value=True, key=K("surv"),
+                               help="Si la calificación sintética es peor que BBB, el valor se multiplica por (1 − probabilidad de quiebra a 10 años), "
+                                    "con la tabla de Damodaran. En una quiebra se supone que el accionista no recibe nada.")
         ind_manual = st.selectbox("Industria para comparar (Damodaran)", ["Automática"] + industry_names(),
                                   key=K("dind"),
                                   help="Si la app no detecta la industria (pasa cuando Yahoo no la informa), elegila acá.")
@@ -312,6 +318,7 @@ except Exception as e:  # noqa: BLE001
     st.error(f"No pude cargar **{sym}**: {e}")
     st.stop()
 
+_CAP = "capitalización de mercado (posible ADR sin ajustar)"
 _miss = data_yahoo.missing_fields(co)
 if _miss:
     _effects = {
@@ -319,11 +326,13 @@ if _miss:
         "país": "sin país se usa un impuesto marginal de 25 % (supuesto), prima de riesgo país 0 y los arrendamientos se cuentan como deuda",
         "sector": "sin sector se pierde el aviso de industrias cíclicas",
         "nombre": "sin nombre solo se muestra el ticker",
+        _CAP: "las acciones son las ORDINARIAS y no las del ADR que cotiza: el valor por acción puede estar mal por un múltiplo (ej.: TSM = 5, TM = 10). "
+              "No uses este valor; reintentá, o cargá 'ordinarias por ADR' en la barra lateral",
     }
     _list = _miss[0] if len(_miss) == 1 else ", ".join(_miss[:-1]) + " y " + _miss[-1]
     _detail = "; ".join(_effects[m] for m in _miss) + "."
     _retry = " Probá de nuevo en unos minutos: esta carga no se guarda, así que el reintento vuelve a consultar. Detalle en los avisos de más abajo."
-    if "industria" in _miss:
+    if "industria" in _miss or _CAP in _miss:
         st.error(f"🔴 **Resultado degradado: no pude leer {_list} de la empresa en Yahoo.** {_detail[0].upper() + _detail[1:]}{_retry}")
     else:
         _tip = (" Si la empresa no es de EE.UU., cargá la prima de riesgo país en la barra lateral." if "país" in _miss else "")
@@ -350,7 +359,7 @@ p = Params(
     wacc_override=wacc_manual or None, persistence=persistence, affo_ratio=affo_ratio,
     affo_ps_override=affo_ps or None,
     include_leases={"auto": None, "sí": True, "no": False}[lease_opt],
-    use_industry_beta=use_ind_beta, include_nonop=incl_nonop,
+    use_industry_beta=use_ind_beta, include_nonop=incl_nonop, capitalize_rd=cap_rd, survival_adj=surv_adj,
 )
 
 _logo = get_logo(co.ticker, co.website)
@@ -435,6 +444,13 @@ for col, name in zip(cols, SCEN_ORDER):
         else:
             st.metric(f"{name}", "n/d")
             st.caption(r.error)
+
+_lc = base.extras.get("lifecycle")
+if _lc:
+    st.caption(f"🧭 **Etapa: {_lc}.** Según Damodaran, lo que más pesa en su valor: {base.extras.get('lifecycle_factors', '')}.")
+if base.extras.get("p_default"):
+    st.warning(f"⚠️ **Riesgo de quiebra:** calificación sintética {base.extras['rating']}; el valor ya está multiplicado por "
+               f"(1 − {base.extras['p_default']:.0%}). Como negocio en marcha valdría {money(base.extras['per_share_going'], co.currency)} por acción (Base).")
 
 buy = base.per_share * (1 - mos)
 st.write(f"**Precio de compra con {mos:.0%} de margen de seguridad sobre el escenario Base:** "
@@ -611,11 +627,11 @@ with t1:
         with st.expander(f"🏰 Foso estimado: {base.extras['moat_label']} ({base.extras['moat_src']}) — ver razones"):
             for _w in base.extras["moat_reasons"]:
                 st.write("• " + _w)
-            st.caption("Estimación propia de la app (no es una calificación de Morningstar): Amplio = al menos 2 de 3 criterios, "
-                       "con el retorno sobre capital obligatorio · Estrecho = 1 o más · Ninguno = ninguno. "
+            st.caption("Estimación propia de la app (no es una calificación de Morningstar): Amplio = los tres criterios, "
+                       "con el exceso de retorno obligatorio · Estrecho = solo exceso de retorno, o con uno de los otros (también si el ROIC queda a menos de 1 pp del umbral y cumple los otros dos) · Ninguno = sin exceso de retorno. "
                        "Los umbrales son una primera versión y se van a calibrar con casos reales. Podés forzar el foso en la barra lateral.")
     st.caption("Los escenarios cambian solo palancas del negocio: crecimiento de ingresos, margen y ventaja competitiva "
-               "(Pesimista: moat −2 pp y sin persistencia en financieras · Optimista: +2 pp). Las tasas de descuento y el "
+               "(Pesimista: margen objetivo −15 %, moat −2 pp y sin persistencia en financieras · Optimista: margen +15 %, moat +2 pp). Las tasas de descuento y el "
                "crecimiento terminal no cambian entre escenarios: mirá su efecto en la pestaña Sensibilidad.")
 
 with t2:
@@ -742,16 +758,15 @@ with t5:
 * **FCFF desde ingresos** (no financieras). Los ingresos de los años 1–2 siguen las estimaciones de analistas
   (si no hay, la mediana histórica acotada, y la app lo marca como «confianza menor»); ese ritmo se **sostiene hasta el año 5** y después
   baja gradualmente hasta *g* terminal en el último año. Pesimista y optimista usan el rango de analistas cuando existe (si no, ±3 pp).
-  El margen EBIT converge desde el TTM al objetivo (mediana histórica por defecto; opciones: TTM, analistas, manual); si la empresa
-  tiene pérdida operativa, converge al margen promedio de su industria. El impuesto converge de la tasa efectiva a la **marginal del país**
+  El margen EBIT converge desde el TTM al objetivo (mediana histórica por defecto; opciones: TTM, analistas, manual); en los escenarios el objetivo se mueve ∓15 % (relativo). Si el TTM está 8 pp o más bajo el objetivo y los ingresos no caen (posible cargo extraordinario), el pesimista no se ancla al TTM. Si la empresa
+  tiene pérdida operativa, converge a su propio nivel de años rentables (con tope de 1,5× el margen de la industria) o, si nunca fue rentable, al margen promedio de su industria. El impuesto converge de la tasa efectiva a la **marginal del país**
   (tabla de Damodaran) en 5 años. La **reinversión sale solo del crecimiento**: reinversión = *g* / ROIC, con un ROIC inicial normalizado (calculado con el margen objetivo, no con el EBIT del TTM, que puede estar distorsionado por cargos extraordinarios) que converge al
   **ROIC terminal**: con datos de industria, *Amplio* = ROC del sector (Damodaran), *Estrecho* = punto medio con el costo del capital,
   *Ninguno* = costo del capital (nunca por encima del ROIC actual; *Amplio* y *Estrecho* tienen un piso de WACC + 3 / + 2 pp); sin datos, WACC + 0/2/5 pp. Así el crecimiento solo vale si hay
-  ventaja competitiva. El **foso se estima automáticamente** con tres criterios (retorno sobre capital frente al mayor entre el ROC del sector y su WACC + 2 pp, margen frente al sector,
-  estabilidad del margen); se puede forzar a mano. Si el valor del patrimonio da negativo se muestra 0 (responsabilidad limitada). El **WACC converge** del de la empresa al del sector: constante hasta el año 5 y luego
+  ventaja competitiva. El **foso se estima automáticamente** con tres criterios (exceso de retorno: ROIC ≥ WACC del sector + 5 pp, obligatorio porque para Damodaran el foso es un retorno sostenidamente por encima del costo del capital; persistencia de los márgenes recientes; y ser mejor que sus pares en margen o retorno). Las productoras de materias primas y aerolíneas quedan limitadas a Estrecho; se puede forzar a mano. Si el valor del patrimonio da negativo se muestra 0 (responsabilidad limitada). El **WACC converge** del de la empresa al del sector: constante hasta el año 5 y luego
   lineal hasta el último año; el sector se reconstruye con las mismas tasas (Rf, prima de mercado y país) y la beta y deuda típicas de su industria.
   El capital invertido es operativo (deuda + patrimonio − caja − inversiones en otras empresas). Valor terminal de Gordon sobre
-  NOPAT × (1 − g/ROIC) con el WACC del sector; la distancia WACC − g se mantiene en al menos 2,5 pp.
+  NOPAT × (1 − g/ROIC) con el WACC del sector; el gasto en **I+D se capitaliza** (se suma al resultado operativo y se amortiza en 4 años, con el I+D no amortizado como activo); si la calificación sintética es peor que BBB el valor se multiplica por (1 − probabilidad de quiebra a 10 años) (tabla del libro de Damodaran); la distancia WACC − g se mantiene en al menos 2,5 pp.
   EV + caja + inversiones en otras empresas − deuda − minoritarios = patrimonio, dividido por las acciones implícitas.
 * **Retorno excedente** (bancos, aseguradoras, mREITs, brokers). Valor = book value + VP de (ROE − Ke) × patrimonio. El ROE
   parte de un valor normalizado y cae hacia Ke + persistencia × (ROE normalizado − Ke); el payout converge al compatible con *g*.
