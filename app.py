@@ -58,7 +58,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.19.2 · 16/10/2026"
+APP_VERSION = "v2.20 · 16/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -195,6 +195,13 @@ def K(name):
     """Clave de widget que cambia con cada ticker nuevo => los valores se reinician."""
     return f"{name}_{st.session_state.get('rn', 0)}"
 
+
+_mode = st.sidebar.radio("Modo", ["Una empresa", "Lote de empresas"], key="app_mode",
+                         help="«Lote de empresas» valúa muchas empresas de una vez y devuelve un solo Excel (para calibrar el modelo).")
+if _mode == "Lote de empresas":
+    import lote
+    lote.render(cached_load, STRETCH, APP_VERSION)
+    st.stop()
 
 with st.sidebar:
     st.header("Supuestos")
