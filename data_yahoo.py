@@ -481,6 +481,47 @@ def yf_fallback(sym: str) -> dict:
     return out
 
 
+RETRY_WAITS = (1.5, 3.0)     # segundos entre reintentos cuando Yahoo no entrega el perfil (los tests lo ponen en ())
+
+
+def search_profile(sym: str) -> dict:
+    """Fuente alternativa liviana: el buscador de Yahoo (no usa 'crumb') suele devolver nombre, sector e industria
+    aun cuando el endpoint de perfil está limitado. No trae país. Nunca falla: devuelve {} si no hay respuesta."""
+    try:
+        import json
+        import urllib.parse
+        import urllib.request
+        url = ("https://query2.finance.yahoo.com/v1/finance/search?q=" + urllib.parse.quote(sym)
+               + "&quotesCount=6&newsCount=0")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore"))
+        for q in data.get("quotes") or []:
+            if str(q.get("symbol", "")).upper() == sym.upper():
+                out = {}
+                sec = q.get("sectorDisp") or q.get("sector")
+                ind = q.get("industryDisp") or q.get("industry")
+                nm = q.get("longname") or q.get("shortname")
+                if sec:
+                    out["sector"] = str(sec)
+                if ind:
+                    out["industry"] = str(ind)
+                if nm:
+                    out["name"] = str(nm)
+                return out
+    except Exception:
+        pass
+    return {}
+
+
+def is_degraded(co: CompanyData) -> bool:
+    """Carga incompleta: falta industria o país (o el nombre). Con eso el resultado es menos confiable
+    (sin beta ni referencias del sector, impuesto por defecto, arrendamientos mal tratados)."""
+    if co.quote_type and co.quote_type != "EQUITY":
+        return False
+    return not (co.industry and co.country and co.name and co.name.upper() != (co.ticker or "").upper())
+
+
 def get_risk_free() -> Tuple[float, bool]:
     """Rendimiento del bono a 10 años de EE.UU. (^TNX). (valor, vino_de_yahoo).
     Orden: cotización de Yahoo -> FRED (Reserva Federal) -> historial de Yahoo -> valor fijo."""
@@ -511,16 +552,21 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
         raise DataError("Ingresá un ticker.")
     t = Ticker(sym, timeout=20)
 
-    def safe(fn):
-        try:
-            return mod(fn(), sym)
-        except Exception:
-            return {}
+    failed: List[str] = []
 
-    price_m = safe(lambda: t.price)
-    summary, keystats = safe(lambda: t.summary_detail), safe(lambda: t.key_stats)
-    profile, fin = safe(lambda: t.asset_profile), safe(lambda: t.financial_data)
-    trend = safe(lambda: t.earnings_trend)
+    def safe(fn, label: str = ""):
+        try:
+            r = mod(fn(), sym)
+        except Exception:
+            r = {}
+        if not r and label:
+            failed.append(label)
+        return r
+
+    price_m = safe(lambda: t.price, "precio/cotización")
+    summary, keystats = safe(lambda: t.summary_detail, "resumen"), safe(lambda: t.key_stats, "estadísticas")
+    profile, fin = safe(lambda: t.asset_profile, "perfil (sector/industria/país)"), safe(lambda: t.financial_data, "datos financieros")
+    trend = safe(lambda: t.earnings_trend, "estimaciones de analistas")
     try:
         dfa = t.get_financial_data(ALL_FIELDS, frequency="a", trailing=True)
         dfq = t.get_financial_data(ALL_FIELDS, frequency="q", trailing=True)
@@ -532,6 +578,24 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
     fb_price = fb_cur = None
     if not sf(price_m.get("regularMarketPrice")):
         fb_price, fb_cur = _last_close(sym), _guess_currency(sym)
+
+    # Reintentos: Yahoo a veces limita los módulos de perfil/cotización por unos segundos.
+    if not profile.get("industry") or not (price_m.get("longName") or price_m.get("shortName")):
+        import time
+        for wait in RETRY_WAITS:
+            time.sleep(wait)
+            try:
+                t2 = Ticker(sym, timeout=20)
+                if not profile.get("industry"):
+                    profile = mod(t2.asset_profile, sym) or profile
+                if not (price_m.get("longName") or price_m.get("shortName")):
+                    price_m = mod(t2.price, sym) or price_m
+            except Exception:
+                pass
+            if profile.get("industry") and (price_m.get("longName") or price_m.get("shortName")):
+                if "perfil (sector/industria/país)" in failed:
+                    failed.remove("perfil (sector/industria/país)")
+                break
 
     alt: dict = {}
     need_alt = (not profile.get("industry") or not (price_m.get("longName") or price_m.get("shortName")) or not any(
@@ -545,6 +609,13 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
         profile = {**profile, **{k: alt[k] for k in ("sector", "industry", "country", "website") if alt.get(k)}}
     if alt.get("website") and not profile.get("website"):
         profile = {**profile, "website": alt["website"]}
+    if not profile.get("industry") or not (price_m.get("longName") or price_m.get("shortName")):
+        sp = search_profile(sym)                     # tercera vía: buscador de Yahoo (sin país)
+        if sp.get("industry") and not profile.get("industry"):
+            profile = {**profile, **{k: sp[k] for k in ("sector", "industry") if sp.get(k)}}
+            alt = {**alt, "search": True}
+        if sp.get("name") and not (price_m.get("longName") or price_m.get("shortName")):
+            price_m = {**price_m, "longName": sp["name"]}
     if ("g0" in alt or "g1" in alt) and not any(
             i.get("revenueEstimate") for i in (trend.get("trend") or []) if isinstance(i, dict)):
         trend = {"trend": [{"period": "0y", "revenueEstimate": {"growth": alt.get("g0")}},
@@ -559,5 +630,9 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
     if not ok:
         warns.append(f"No pude leer la tasa del Tesoro a 10 años: se usó Rf = {RF_FALLBACK:.2%}.")
     if alt:
-        warns.append("Sector/industria/estimaciones/beta completados con una fuente alternativa (yfinance).")
+        warns.append("Sector/industria/estimaciones/beta completados con una fuente alternativa (yfinance / buscador de Yahoo).")
+    if is_degraded(co):
+        miss = [n for n, v in (("sector", co.sector), ("industria", co.industry), ("país", co.country), ("nombre", co.name if co.name.upper() != co.ticker.upper() else "")) if not v]
+        warns.append("🔴 Carga incompleta: no pude leer " + ", ".join(miss) + " de Yahoo (ni con reintentos ni con fuentes alternativas)"
+                     + (f". Módulos que no respondieron: {', '.join(failed)}" if failed else "") + ".")
     return co, warns

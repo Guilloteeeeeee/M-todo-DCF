@@ -492,9 +492,12 @@ def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float,
 # ----------------------------------------------------------------------------
 # Foso (moat) automático
 # ----------------------------------------------------------------------------
-def classify_moat(co: CompanyData, wacc: float, roic_now: Optional[float], loss: bool) -> Tuple[str, List[str]]:
+def classify_moat(co: CompanyData, wacc: float, roic_now: Optional[float], loss: bool,
+                  wacc_ref: Optional[float] = None) -> Tuple[str, List[str]]:
     """Estimación propia del foso con tres criterios (cada uno suma 1):
-      1. Retorno sobre capital (ROIC) ≥ el mayor entre el ROC del sector y WACC + 5 pp (sin sector: WACC + 8 pp).
+      1. Retorno sobre capital (ROIC) ≥ el mayor entre el ROC del sector y el WACC del SECTOR + 2 pp
+         (sin datos del sector: WACC de la empresa + 8 pp). Se usa el WACC del sector y no el de la empresa porque el foso
+         es una propiedad de largo plazo y el WACC propio incluye situaciones financieras pasajeras (ej. deuda cara).
       2. Margen EBIT (mediana de 4 años + TTM) ≥ margen del sector + 5 pp.
       3. Margen estable: rango (máx − mín) ≤ 4 pp en los últimos años y siempre positivo.
     Amplio = 2 o más, con el ROIC obligatorio · Estrecho = al menos 1 · Ninguno = 0."""
@@ -506,7 +509,8 @@ def classify_moat(co: CompanyData, wacc: float, roic_now: Optional[float], loss:
         reasons.append("1) ROIC: sin capital invertido utilizable, no se evalúa.")
     else:
         if co.ind_roc is not None:
-            thr, how = max(co.ind_roc, wacc + 0.05), "el mayor entre el ROC del sector y WACC + 5 pp"
+            w_ref = wacc_ref if wacc_ref is not None else wacc
+            thr, how = max(co.ind_roc, w_ref + 0.02), "el mayor entre el ROC del sector y el WACC del sector + 2 pp"
         else:
             thr, how = wacc + 0.08, "WACC + 8 pp (sin datos del sector)"
         hits[1] = roic_now >= thr
@@ -539,18 +543,20 @@ def _terminal_roic(co: CompanyData, spread: float, wacc: float, roic0: float, sp
     Con dato de industria (criterio Damodaran: una ventaja sostenida mantiene el ROC del sector):
       Ninguno  = WACC
       Estrecho = punto medio entre WACC y el ROC del sector (mínimo WACC + 2 pp)
-      Amplio   = ROC del sector (mínimo WACC + 5 pp)
-    Nunca por encima del ROIC actual de la empresa ni del tope. Escenarios: -2 pp / +2 pp en el spread."""
+      Amplio   = ROC del sector (mínimo WACC + 3 pp, para que siga por encima de Estrecho en sectores de retorno bajo)
+    Nunca por encima del ROIC actual de la empresa (salvo que el mínimo lo exija) ni del tope.
+    Escenarios: -2 pp / +2 pp en el spread."""
     roc = co.ind_roc
     note = ""
     if roc is not None and spread > 0:
         roc = clamp(roc, wacc, roic_cap)
         if spread >= 0.05:
-            tgt = max(wacc + spread, roc)
+            floor = wacc + 0.03
+            tgt = max(floor, roc)
         else:
-            tgt = max(wacc + spread, wacc + 0.5 * (roc - wacc))
-        cap = max(roic0, wacc + spread)
-        tgt = min(tgt, cap)
+            floor = wacc + spread
+            tgt = max(floor, wacc + 0.5 * (roc - wacc))
+        tgt = min(tgt, max(roic0, floor))
         note = f"anclado al ROC del sector ({co.ind_roc:.1%})"
     else:
         tgt = wacc + spread
@@ -619,7 +625,18 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     else:
         ic = 0.0
     if ic > 0:
-        roic0 = clamp(nopat0 / ic, 0.03, p.roic_cap)
+        # ROIC inicial NORMALIZADO: con el margen objetivo del caso base (no con el EBIT del TTM, que puede estar deprimido
+        # por cargos extraordinarios y contradice la proyección). Es el mismo en los tres escenarios.
+        if loss:
+            nopat_norm = nopat0
+        else:
+            _, mT_base, _ = margin_target(co, p, replace(scen, m_rule="base"))
+            nopat_norm = co.revenue_ttm * mT_base * (1 - tax0)
+        roic0_ttm = clamp(nopat0 / ic, 0.03, p.roic_cap)
+        roic0 = clamp(nopat_norm / ic, 0.03, p.roic_cap)
+        if abs(roic0 - roic0_ttm) > 0.03:
+            warns.append(f"ROIC inicial normalizado con el margen objetivo ({roic0:.1%}) en lugar del margen del TTM ({roic0_ttm:.1%}): "
+                         "así la reinversión es coherente con el margen proyectado.")
     else:
         roic0 = p.roic_cap
         warns.append("Sin capital invertido utilizable: ROIC inicial = tope.")
@@ -637,7 +654,7 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         moat_label, spread_base = p.moat, MOAT_SPREADS[p.moat]
         moat_reasons, moat_src = ["Elegido por vos."], "elegido"
     else:
-        moat_label, moat_reasons = classify_moat(co, wacc, roic0 if ic > 0 else None, loss)
+        moat_label, moat_reasons = classify_moat(co, wacc, roic0 if ic > 0 else None, loss, wacc_ref=wacc_T)
         spread_base, moat_src = MOAT_SPREADS[moat_label], "automático"
     spread = max(0.0, spread_base + scen.spread_delta)
     roicT, roic_note = _terminal_roic(co, spread_base, wacc_T, roic0, scen.spread_delta, p.roic_cap)
@@ -692,7 +709,8 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     equity = ev + co.cash + nonop - debt_sub - co.minority
     if nonop > 0.15 * co.market_cap_m:
         warns.append(f"Las inversiones en otras empresas ({nonop:,.0f} M) pesan más del 15 % de la capitalización y se suman a valor contable (puede diferir del de mercado).")
-    per_share = equity / co.shares_m
+    per_share_raw = equity / co.shares_m
+    per_share = max(0.0, per_share_raw)                  # responsabilidad limitada: una acción no vale menos que cero
     tv_share = pv_tv / ev if ev > 0 else float("nan")
 
     exit_mult = tv / ebit_N if ebit_N > 0 else float("nan")
@@ -701,7 +719,8 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     if exit_mult > 25:
         warns.append(f"Múltiplo de salida implícito EV/EBIT = {exit_mult:.1f}x (alto).")
     if equity <= 0:
-        warns.append("Valor del patrimonio ≤ 0 en este escenario.")
+        warns.append(f"Con estos supuestos el valor de la empresa ({ev:,.0f} M) no alcanza a cubrir la deuda y los minoritarios "
+                     f"(calculado: {per_share_raw:,.2f} por acción): se muestra 0, porque una acción no puede valer menos que cero.")
     if co.ttm_source and "anual" in co.ttm_source.lower():
         warns.append("Se usó el último año fiscal en lugar de TTM (opción activada).")
 
@@ -774,12 +793,14 @@ def excess_return_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     tv = ri_next / (ke - gT)
     pv_tv = tv / (1 + ke) ** N
     equity = bv0 + pv_sum + pv_tv
-    per_share = equity / co.shares_m
+    per_share_raw = equity / co.shares_m
+    per_share = max(0.0, per_share_raw)
     created = pv_sum + pv_tv
     tv_share = pv_tv / equity if equity > 0 else float("nan")
 
     if equity <= 0:
-        warns.append("Valor del patrimonio ≤ 0 en este escenario.")
+        warns.append(f"Valor del patrimonio ≤ 0 en este escenario (calculado: {per_share_raw:,.2f} por acción): se muestra 0, "
+                     "porque una acción no puede valer menos que cero.")
     if roe_norm < ke:
         warns.append(f"ROE normalizado ({roe_norm:.1%}) < Ke ({ke:.1%}): el mercado debería pagar menos que el book value.")
     if abs(created) > 1.5 * bv0:
@@ -847,8 +868,11 @@ def reit_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     tv = affo * (1 + gT) * (1 - gT / roi) / (ke - gT)
     pv_tv = tv / (1 + ke) ** N
     equity = pv_sum + pv_tv
-    per_share = equity / co.shares_m
+    per_share_raw = equity / co.shares_m
+    per_share = max(0.0, per_share_raw)
     tv_share = pv_tv / equity if equity > 0 else float("nan")
+    if equity <= 0:
+        warns.append(f"Valor ≤ 0 en este escenario (calculado: {per_share_raw:,.2f} por acción): se muestra 0.")
     if tv_share > 0.80:
         warns.append(f"El valor terminal pesa {tv_share:.0%} del valor.")
     return ValResult(

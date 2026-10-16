@@ -58,7 +58,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.17 · 15/10/2026"
+APP_VERSION = "v2.19 · 16/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -69,9 +69,26 @@ SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
 
 
 # ----------------------------------------------------------------------------
+class _Degraded(Exception):
+    """Carga incompleta: se devuelve igual, pero NO se guarda en la caché (así volver a intentar reintenta de verdad)."""
+    def __init__(self, payload):
+        super().__init__("carga incompleta")
+        self.payload = payload
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
+def _cached_load_ok(sym: str, allow_annual: bool, adr_ratio: float):
+    co_, warns_ = data_yahoo.load_company(sym, allow_annual, adr_ratio or None)
+    if data_yahoo.is_degraded(co_):
+        raise _Degraded((co_, warns_))
+    return co_, warns_
+
+
 def cached_load(sym: str, allow_annual: bool, adr_ratio: float):
-    return data_yahoo.load_company(sym, allow_annual, adr_ratio or None)
+    try:
+        return _cached_load_ok(sym, allow_annual, adr_ratio)
+    except _Degraded as e:
+        return e.payload
 
 
 def pct(x, d=1):
@@ -288,6 +305,12 @@ except Exception as e:  # noqa: BLE001
     st.error(f"No pude cargar **{sym}**: {e}")
     st.stop()
 
+if data_yahoo.is_degraded(co):
+    st.error("🔴 **Resultado degradado: no pude leer todos los datos de la empresa en Yahoo** "
+             "(sector, industria, país o nombre). Sin industria no hay beta ni referencias del sector; sin país se usa un impuesto "
+             "marginal de 25 % y los arrendamientos se cuentan como deuda. Probá de nuevo en unos minutos: esta carga no se guarda, "
+             "así que el reintento vuelve a consultar. Detalle en los avisos de más abajo.")
+
 if crp_auto:
     crp, crp_note = country_crp(co.country)
 else:
@@ -326,8 +349,7 @@ st.write(f"**Tasa libre de riesgo usada:** {_rf_used:.2%} "
          f"({'cargada por vos' if p.rf is not None else 'automática'})")
 st.write(f"**Prima de riesgo país aplicada:** {crp:.2%} — {crp_note}")
 st.write(f"**Tasa marginal de impuestos:** {tax_marg:.2%} — {tax_note}")
-st.write(f"**Crecimiento terminal:** {g_used:.2%} "
-         f"({'cargado por vos' if g_term_in > 0 else 'automático: tasa libre de riesgo − 1 punto, entre 3,5 % y 4,0 %'})")
+g_slot = st.empty()                                   # se completa después de valuar: muestra el g realmente aplicado
 if model_choice == "auto":
     st.info(f"**Modelo: {MODEL_LABELS[model]}.** {why}")
 elif model != auto_model:
@@ -345,6 +367,13 @@ if (model_choice == "auto" and model == "FCFF" and not base.ok and "EBIT" in bas
     co, ind_name, ind_how = attach_industry(co0, model, None if ind_manual == "Automática" else ind_manual)
     res = run_scenarios(co, p, model)
     base = res["Base"]
+
+_g_txt = "cargado por vos" if g_term_in > 0 else "automático: tasa libre de riesgo − 1 punto, entre 3,5 % y 4,0 %"
+if base.ok and abs(base.g_terminal - g_used) > 5e-5:
+    g_slot.write(f"**Crecimiento terminal:** {g_used:.2%} pedido ({_g_txt}) → **{base.g_terminal:.2%} aplicado**: "
+                 "el modelo mantiene una distancia mínima con la tasa de descuento (ver avisos).")
+else:
+    g_slot.write(f"**Crecimiento terminal:** {g_used:.2%} ({_g_txt})")
 
 all_warns = list(dict.fromkeys(load_warns + data_checks(co)))
 if model == "FCFF" and (co.sector or "") in ("Energy", "Basic Materials"):
@@ -696,11 +725,11 @@ with t5:
   baja gradualmente hasta *g* terminal en el último año. Pesimista y optimista usan el rango de analistas cuando existe (si no, ±3 pp).
   El margen EBIT converge desde el TTM al objetivo (mediana histórica por defecto; opciones: TTM, analistas, manual); si la empresa
   tiene pérdida operativa, converge al margen promedio de su industria. El impuesto converge de la tasa efectiva a la **marginal del país**
-  (tabla de Damodaran) en 5 años. La **reinversión sale solo del crecimiento**: reinversión = *g* / ROIC, con ROIC que converge al
+  (tabla de Damodaran) en 5 años. La **reinversión sale solo del crecimiento**: reinversión = *g* / ROIC, con un ROIC inicial normalizado (calculado con el margen objetivo, no con el EBIT del TTM, que puede estar distorsionado por cargos extraordinarios) que converge al
   **ROIC terminal**: con datos de industria, *Amplio* = ROC del sector (Damodaran), *Estrecho* = punto medio con el costo del capital,
-  *Ninguno* = costo del capital (nunca por encima del ROIC actual); sin datos, WACC + 0/2/5 pp. Así el crecimiento solo vale si hay
-  ventaja competitiva. El **foso se estima automáticamente** con tres criterios (retorno sobre capital, margen frente al sector,
-  estabilidad del margen); se puede forzar a mano. El **WACC converge** del de la empresa al del sector: constante hasta el año 5 y luego
+  *Ninguno* = costo del capital (nunca por encima del ROIC actual; *Amplio* y *Estrecho* tienen un piso de WACC + 3 / + 2 pp); sin datos, WACC + 0/2/5 pp. Así el crecimiento solo vale si hay
+  ventaja competitiva. El **foso se estima automáticamente** con tres criterios (retorno sobre capital frente al mayor entre el ROC del sector y su WACC + 2 pp, margen frente al sector,
+  estabilidad del margen); se puede forzar a mano. Si el valor del patrimonio da negativo se muestra 0 (responsabilidad limitada). El **WACC converge** del de la empresa al del sector: constante hasta el año 5 y luego
   lineal hasta el último año; el sector se reconstruye con las mismas tasas (Rf, prima de mercado y país) y la beta y deuda típicas de su industria.
   El capital invertido es operativo (deuda + patrimonio − caja − inversiones en otras empresas). Valor terminal de Gordon sobre
   NOPAT × (1 − g/ROIC) con el WACC del sector; la distancia WACC − g se mantiene en al menos 2,5 pp.
