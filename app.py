@@ -20,10 +20,28 @@ try:
                                attach as attach_industry, get_ref, industry_names)
     from dcf_models import (MOAT_SPREADS, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model,
                             run_scenarios, sensitivity, terminal_growth_default)
-except ImportError as _imp_err:   # archivos de versiones distintas en GitHub: mensaje claro en vez de un traceback críptico
-    st.error("**Hay archivos de versiones distintas en GitHub.** Subí juntos todos los .py de la misma versión "
-             "(app.py, dcf_models.py, industry_data.py, data_yahoo.py, lote.py, country_risk.py, country_tax.py) y reiniciá la app. "
-             f"Detalle técnico: {_imp_err}")
+except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
+    import os as _os
+    _aqui = _os.path.dirname(_os.path.abspath(__file__))
+    _marcas = {"dcf_models.py": "ZONE_NAMES", "industry_data.py": "ERP_DAMODARAN", "data_yahoo.py": "pension_liab", "lote.py": "implied_wacc"}
+
+    def _tiene(archivo, marca):
+        try:
+            with open(_os.path.join(_aqui, archivo), encoding="utf-8") as _f:
+                return marca in _f.read()
+        except OSError:
+            return None
+    _estado = {k: _tiene(k, m) for k, m in _marcas.items()}
+    _viejos = [k for k, v in _estado.items() if v is False]
+    _faltan = [k for k, v in _estado.items() if v is None]
+    if _viejos or _faltan:
+        _dx = ("**Archivos en el repositorio que NO tienen la versión nueva:** " + ", ".join(_viejos) + ". " if _viejos else "") + \
+              ("**No encontré:** " + ", ".join(_faltan) + ". " if _faltan else "") + \
+              "Subí esos archivos con su nombre exacto (sin «(1)») a la misma carpeta que app.py."
+    else:
+        _dx = ("**Los archivos del repositorio SÍ son los nuevos.** La app tiene guardada en memoria una versión vieja: "
+               "abrí «Manage app» (abajo a la derecha) → menú ⋮ → **Reboot app**.")
+    st.error(f"**Versiones distintas o módulo viejo en memoria.** {_dx}\n\nDetalle técnico: {_imp_err}")
     st.stop()
 
 
@@ -65,7 +83,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.32 · 17/10/2026"
+APP_VERSION = "v2.33 · 17/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -106,6 +124,7 @@ def money(x, cur="", d=2):
     return "n/d" if x is None or x != x else f"{x:,.{d}f} {cur}".strip()
 
 
+PRICE_COLOR = "#4fc3f7"   # celeste del marcador de precio
 ZONE_COLORS = ["#1a7f37", "#7cc242", "#f2c230", "#f28c28", "#d63a2f"]
 ZONE_PHRASES = [
     "🟢 **Muy infravalorada:** el precio está por debajo incluso del escenario pesimista.",
@@ -130,7 +149,7 @@ def verdict(price, res):
 
 
 def zone_bar_html(z, price, cur=""):
-    """Barra de 5 colores con el precio actual como marcador (HTML simple, sin librerías)."""
+    """Barra de 5 colores con el precio actual como marcador celeste bien visible (HTML simple, sin librerías)."""
     cuts, base = z["cuts"], z["base"]
     lo = min(cuts[0], price) * 0.8
     hi = max(cuts[3], price) * 1.1
@@ -141,19 +160,24 @@ def zone_bar_html(z, price, cur=""):
     pos = lambda v: max(0.0, min(100.0, (v - lo) / span * 100))
     segs = "".join(f'<div style="width:{(edges[k + 1] - edges[k]) / span * 100:.3f}%;background:{ZONE_COLORS[k]}" '
                    f'title="{ZONE_NAMES[k]}"></div>' for k in range(5))
+
     def tick(v, name):
-        return (f'<div style="position:absolute;left:{pos(v):.2f}%;top:22px;transform:translateX(-50%);text-align:center;'
-                f'font-size:11px;line-height:1.25;white-space:nowrap">{name}<br><b>{v:,.2f}</b></div>')
-    pr = (f'<div style="position:absolute;left:{pos(price):.2f}%;top:-34px;transform:translateX(-50%);text-align:center;'
-          f'font-size:12px;font-weight:700;line-height:1.1;white-space:nowrap">Precio {price:,.2f} {cur}<br>▼</div>')
+        return (f'<div style="position:absolute;left:{pos(v):.2f}%;top:34px;transform:translateX(-50%);text-align:center;'
+                f'font-size:13px;line-height:1.3;white-space:nowrap">{name}<br><b style="font-size:15px">{v:,.2f}</b></div>')
+    px = pos(price)
+    marker = (f'<div style="position:absolute;left:{px:.2f}%;top:-8px;width:5px;height:42px;transform:translateX(-50%);'
+              f'background:{PRICE_COLOR};border:1px solid #fff;border-radius:3px;box-shadow:0 0 0 1px rgba(0,0,0,.35)"></div>'
+              f'<div style="position:absolute;left:{px:.2f}%;top:-46px;transform:translateX(-50%);background:{PRICE_COLOR};color:#04283a;'
+              f'font-size:14px;font-weight:700;line-height:1;padding:5px 9px;border-radius:12px;white-space:nowrap;'
+              f'box-shadow:0 1px 3px rgba(0,0,0,.35)">Precio {price:,.2f} {cur}</div>')
     if cuts[3] <= 0:        # los tres escenarios valen 0: una sola etiqueta en vez de tres encimadas
-        ticks = ('<div style="position:absolute;left:0;top:22px;font-size:11px;white-space:nowrap">'
+        ticks = ('<div style="position:absolute;left:0;top:34px;font-size:13px;white-space:nowrap">'
                  'Pesimista, base y optimista: <b>0</b> por acción</div>')
     else:
         ticks = tick(cuts[0], "Pesimista") + tick(base, "Base") + tick(cuts[3], "Optimista")
-    return ('<div style="position:relative;margin:42px 14px 52px 14px;">' + pr +
-            f'<div style="display:flex;height:18px;border-radius:9px;overflow:hidden;border:1px solid rgba(128,128,128,.4)">{segs}</div>' +
-            ticks + '</div>')
+    return ('<div style="position:relative;margin:56px 14px 66px 14px;">'
+            f'<div style="display:flex;height:22px;border-radius:11px;overflow:hidden;border:1px solid rgba(128,128,128,.4)">{segs}</div>'
+            + marker + ticks + '</div>')
 
 
 def build_excel(co, res, base, sens, p, model):
