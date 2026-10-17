@@ -74,6 +74,7 @@ class CompanyData:
     debt: float = 0.0                  # incluye arrendamientos
     lease_debt: float = 0.0            # parte de 'debt' que son arrendamientos
     minority: float = 0.0
+    pension_liab: Optional[float] = None   # pensiones y beneficios post-empleo (M): INFORMATIVO, no se resta del valor
     rev_g_y0: Optional[float] = None   # crecimiento ingresos estimado año fiscal en curso
     rev_g_y1: Optional[float] = None   # crecimiento ingresos estimado año fiscal siguiente
     rev_gl_y0: Optional[float] = None  # crecimiento de ingresos: estimación MÍNIMA de analistas (año en curso)
@@ -720,6 +721,34 @@ def lifecycle_info(co: CompanyData, model: str, g1: Optional[float]) -> Tuple[st
 
 
 # ----------------------------------------------------------------------------
+# Zonas de valuación: dónde está el precio respecto de los tres escenarios (reemplaza al margen de seguridad fijo)
+# ----------------------------------------------------------------------------
+ZONE_NAMES = ["Muy infravalorada", "Infravalorada", "Bien valuada", "Sobrevalorada", "Muy sobrevalorada"]
+
+
+def price_zones(pes: Optional[float], base: Optional[float], opt: Optional[float], price: float) -> Optional[dict]:
+    """Cinco zonas a partir de los escenarios de la propia empresa (no de un porcentaje fijo):
+    muy infravalorada = precio < pesimista; infravalorada = pesimista a punto medio(pesimista, base); bien valuada = entre los dos puntos
+    medios alrededor del base; sobrevalorada = punto medio(base, optimista) a optimista; muy sobrevalorada = precio > optimista.
+    Devuelve {'cuts': [pes, m1, m2, opt], 'zone': 0..4, 'name': str} o None si falta algún escenario."""
+    if pes is None or base is None or opt is None or price is None or price != price:
+        return None
+    a, b, c = sorted((float(pes), float(base), float(opt)))
+    m1, m2 = (a + b) / 2, (b + c) / 2
+    if price < a:
+        z = 0
+    elif price < m1:
+        z = 1
+    elif price < m2:
+        z = 2
+    elif price <= c:
+        z = 3
+    else:
+        z = 4
+    return {"cuts": [a, m1, m2, c], "base": b, "zone": z, "name": ZONE_NAMES[z]}
+
+
+# ----------------------------------------------------------------------------
 # Capitalización del gasto en I+D (Damodaran, cap. 11)
 # ----------------------------------------------------------------------------
 RD_LIFE = 4        # años de vida amortizable: los que entrega Yahoo (el libro usa 10 en farmacéuticas, pero no hay tanta historia)
@@ -1125,6 +1154,38 @@ def sensitivity(co: CompanyData, p: Params, model: str, d_rate=(-0.01, -0.005, 0
     return dict(ok=True, rates=[r0 + d for d in d_rate], gs=[p.g_terminal + d for d in d_g], grid=grid)
 
 
+def implied_wacc(co: CompanyData, p: Params, model: str, lo: float = -0.08, hi: float = 0.10, iters: int = 18) -> Optional[dict]:
+    """DCF inverso (solo FCFF): desplazamiento de la tasa de descuento con el cual el valor Base iguala el precio.
+    Usa el mismo desplazamiento que la grilla de sensibilidad (mueve juntos el WACC de la empresa y el del sector, así
+    se conserva la convergencia). Devuelve {'wacc': WACC inicial implícito, 'shift': desplazamiento, 'wacc_model': el del modelo}
+    o None si no se puede (otro modelo, valor 0, o el precio no cae dentro del rango de búsqueda)."""
+    if model != "FCFF" or not co.price or co.price <= 0:
+        return None
+    base = value_company(co, p, model, "Base")
+    if not base.ok or base.per_share <= 0:
+        return None
+
+    def val(sh: float) -> Optional[float]:
+        r = value_company(co, replace(p, wacc_shift=p.wacc_shift + sh), model, "Base")
+        return r.per_share if r.ok else None
+
+    v_lo, v_hi = val(lo), val(hi)
+    if v_lo is None or v_hi is None or not (v_lo >= co.price >= v_hi):
+        return None
+    a, b = lo, hi
+    for _ in range(iters):
+        m = (a + b) / 2
+        v = val(m)
+        if v is None:
+            return None
+        if v > co.price:
+            a = m
+        else:
+            b = m
+    sh = (a + b) / 2
+    return {"wacc": base.discount_rate + sh, "shift": sh, "wacc_model": base.discount_rate}
+
+
 def field_checks(co: CompanyData, model: str, p: Optional[Params] = None) -> List[dict]:
     """Control obligatorio por dato importado: qué se usó, si parece razonable y qué revisar.
     Estado: 'ok' (✅), 'aviso' (⚠️: revisar), 'info' (ℹ️: dato faltante con supuesto conocido)."""
@@ -1190,6 +1251,10 @@ def field_checks(co: CompanyData, model: str, p: Optional[Params] = None) -> Lis
             add("Impuesto efectivo", f"{co.tax_rate_eff:.1%}", "aviso" if odd else "ok",
                 "Fuera de 0–35 %: se acotó. Un año atípico no debería usarse mecánicamente." if odd
                 else f"Converge a la marginal del país ({p.marginal_tax:.1%}) en 5 años.")
+        if co.pension_liab is not None and co.pension_liab > 0:
+            add("Pensiones y beneficios post-empleo", f"{co.pension_liab:,.0f} M", "info",
+                "Informativo: NO se resta del valor (Damodaran pide restar los pasivos de pensiones subfinanciados). "
+                "Compará con el valor del patrimonio.")
         ebitda = co.ebit_ttm + co.da_ttm
         debt_net = co.debt if leases else max(0.0, co.debt - co.lease_debt)
         lev = debt_net / ebitda if ebitda > 0 else None

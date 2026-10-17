@@ -12,13 +12,20 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-import data_yahoo
-from country_risk import country_crp
-from country_tax import marginal_tax_for
-from industry_data import (IND, ERP_DAMODARAN, ERP_DATE, ERP_MAX_MESES, erp_is_stale, DATE as IND_DATE, DATE_ISO as IND_DATE_ISO,
-                           attach as attach_industry, get_ref, industry_names)
-from dcf_models import (MOAT_SPREADS, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model, run_scenarios,
-                        sensitivity, terminal_growth_default)
+try:
+    import data_yahoo
+    from country_risk import country_crp
+    from country_tax import marginal_tax_for
+    from industry_data import (IND, ERP_DAMODARAN, ERP_DATE, ERP_MAX_MESES, erp_is_stale, DATE as IND_DATE, DATE_ISO as IND_DATE_ISO,
+                               attach as attach_industry, get_ref, industry_names)
+    from dcf_models import (MOAT_SPREADS, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model,
+                            run_scenarios, sensitivity, terminal_growth_default)
+except ImportError as _imp_err:   # archivos de versiones distintas en GitHub: mensaje claro en vez de un traceback críptico
+    st.error("**Hay archivos de versiones distintas en GitHub.** Subí juntos todos los .py de la misma versión "
+             "(app.py, dcf_models.py, industry_data.py, data_yahoo.py, lote.py, country_risk.py, country_tax.py) y reiniciá la app. "
+             f"Detalle técnico: {_imp_err}")
+    st.stop()
+
 
 def _stretch():
     """Compatibilidad entre versiones de Streamlit (use_container_width fue reemplazado por width='stretch')."""

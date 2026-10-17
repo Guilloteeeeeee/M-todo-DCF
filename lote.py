@@ -19,7 +19,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import data_yahoo
 from country_risk import country_crp
 from country_tax import marginal_tax_for
-from dcf_models import Params, data_checks, field_checks, route_model, run_scenarios, terminal_growth_default
+from dcf_models import Params, data_checks, field_checks, implied_wacc, route_model, run_scenarios, terminal_growth_default
 from industry_data import attach as attach_industry, ERP_DAMODARAN
 
 SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
@@ -161,9 +161,17 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
             "Etapa": base.extras.get("lifecycle", ""), "P(quiebra 10a)": _f(ex.get("p_default")) if ex.get("p_default") else None,
             "I+D capitalizado (M)": _f(ex.get("rd_asset")),
             "VT / EV": _f(base.tv_share), "EV/EBIT salida": _f(ex.get("exit_ev_ebit")),
+            "Pensiones (M)": co2.pension_liab,
+            "Pensiones / patrimonio": (co2.pension_liab / base.equity_value) if (co2.pension_liab and base.equity_value and base.equity_value > 0) else None,
             "Avisos (n)": len(all_w), "Controles ⚠️ (n)": n_check, "Datos faltantes": ", ".join(missing),
             "Banderas": " · ".join(flags), "Primer aviso": (all_w[0][:160] if all_w else ""),
         })
+        try:
+            _imp = implied_wacc(co2, p, model) if estado == "OK" or estado == "Datos incompletos" else None
+        except Exception:  # noqa: BLE001
+            _imp = None
+        row["WACC implícito (precio)"] = _imp["wacc"] if _imp else None
+        row["WACC modelo − implícito (pp)"] = (_imp["wacc_model"] - _imp["wacc"]) * 100 if _imp else None
         if estado in ("No confiable", "No aplica por DCF"):
             ref = "/".join("n/d" if v is None else f"{v:.2f}" for v in (vp, vb, vo))
             row.update({"Valor ref. pes/base/opt": ref, "Pesimista": None, "Base": None, "Optimista": None,
@@ -220,7 +228,7 @@ COLUMNS = ["Ticker", "Empresa", "Estado", "Modelo", "Sector", "Industria", "Paí
            "Pesimista", "Base", "Optimista", "Valor ref. pes/base/opt", "Pes/Base", "Opt/Base", "Base vs precio",
            "WACC", "WACC terminal", "Ke", "g terminal aplicado", "Crecim. año 1", "Fuente crecim.",
            "Margen TTM", "Margen objetivo", "TTM − objetivo (pp)", "ROIC inicial", "ROIC terminal",
-           "Foso", "Origen foso", "Etapa", "P(quiebra 10a)", "I+D capitalizado (M)", "VT / EV", "EV/EBIT salida", "Avisos (n)", "Controles ⚠️ (n)",
+           "Foso", "Origen foso", "Etapa", "P(quiebra 10a)", "I+D capitalizado (M)", "VT / EV", "EV/EBIT salida", "Pensiones (M)", "Pensiones / patrimonio", "WACC implícito (precio)", "WACC modelo − implícito (pp)", "Avisos (n)", "Controles ⚠️ (n)",
            "Datos faltantes", "Banderas", "Primer aviso", "Detalle", "Segundos"]
 
 
@@ -247,7 +255,8 @@ def build_excel(rows: List[dict], raws: Dict[str, str]) -> bytes:
                 ws.column_dimensions[ws.cell(1, i).column_letter].width = 14 if col not in ("Empresa", "Banderas", "Primer aviso", "Detalle", "Industria") else 34
             pct = {"Pes/Base": "0.00", "Opt/Base": "0.00", "Base vs precio": "0%", "WACC": "0.00%", "WACC terminal": "0.00%", "Ke": "0.00%",
                    "g terminal aplicado": "0.00%", "Crecim. año 1": "0.0%", "Margen TTM": "0.0%", "Margen objetivo": "0.0%",
-                   "ROIC inicial": "0.0%", "ROIC terminal": "0.0%", "VT / EV": "0%", "P(quiebra 10a)": "0%", "Pesimista": "0.00", "Base": "0.00", "Optimista": "0.00"}
+                   "ROIC inicial": "0.0%", "ROIC terminal": "0.0%", "VT / EV": "0%", "P(quiebra 10a)": "0%", "Pesimista": "0.00", "Base": "0.00", "Optimista": "0.00",
+                   "Pensiones / patrimonio": "0%", "WACC implícito (precio)": "0.00%", "WACC modelo − implícito (pp)": "0.00"}
             for i, col in enumerate(df.columns, start=1):
                 if col in pct:
                     for r in range(2, ws.max_row + 1):

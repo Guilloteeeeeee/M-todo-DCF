@@ -41,6 +41,7 @@ BAL_FIELDS = [
     "TotalDebt", "CapitalLeaseObligations", "CashCashEquivalentsAndShortTermInvestments", "MinorityInterest",
     "StockholdersEquity", "CommonStockEquity", "InvestedCapital", "OrdinarySharesNumber",
     "InvestmentsAndAdvances", "LongTermEquityInvestment",
+    "NonCurrentPensionAndOtherPostretirementBenefitPlans", "PensionandOtherPostRetirementBenefitPlansCurrent",
 ]
 ALL_FIELDS = FLOW_FIELDS + BAL_FIELDS
 
@@ -300,6 +301,9 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     debt = F.latest("TotalDebt")
     lease = F.latest("CapitalLeaseObligations")
     minority = F.latest("MinorityInterest")
+    _pen = [x for x in (F.latest("NonCurrentPensionAndOtherPostretirementBenefitPlans"),
+                        F.latest("PensionandOtherPostRetirementBenefitPlansCurrent")) if x is not None]
+    pension = sum(_pen) if _pen else None            # solo informativo
     equity = _first(F.latest("CommonStockEquity"), F.latest("StockholdersEquity"))
     ic = F.latest("InvestedCapital")
     nonop = _first(F.latest("InvestmentsAndAdvances"), F.latest("LongTermEquityInvestment"))
@@ -336,7 +340,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         interest_expense_ttm=abs(M(intexp)) if intexp is not None else None,
         revenue_hist=[M(x) for x in rev_h], ebit_hist=[M(x) for x in ebit_h],
         invested_capital=M(ic), non_op_assets=max(M(nonop) or 0.0, 0.0), cash=M(cash) or 0.0, debt=M(debt) or 0.0,
-        lease_debt=min(M(lease) or 0.0, M(debt) or 0.0), minority=M(minority) or 0.0,
+        lease_debt=min(M(lease) or 0.0, M(debt) or 0.0), minority=M(minority) or 0.0, pension_liab=M(pension),
         rev_g_y0=g0, rev_g_y1=g1,
         rev_gl_y0=rng.get("gl_y0"), rev_gl_y1=rng.get("gl_y1"), rev_gh_y0=rng.get("gh_y0"), rev_gh_y1=rng.get("gh_y1"),
         eps_g_y0=rng.get("eg_y0"), eps_g_y1=rng.get("eg_y1"),
