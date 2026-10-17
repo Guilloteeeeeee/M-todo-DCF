@@ -58,7 +58,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.24 · 16/10/2026"
+APP_VERSION = "v2.25 · 17/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -758,7 +758,7 @@ with t5:
 * **FCFF desde ingresos** (no financieras). Los ingresos de los años 1–2 siguen las estimaciones de analistas
   (si no hay, la mediana histórica acotada, y la app lo marca como «confianza menor»); ese ritmo se **sostiene hasta el año 5** y después
   baja gradualmente hasta *g* terminal en el último año. Pesimista y optimista usan el rango de analistas cuando existe (si no, ±3 pp).
-  El margen EBIT converge desde el TTM al objetivo (mediana histórica por defecto; opciones: TTM, analistas, manual); en los escenarios el objetivo se mueve ∓15 % (relativo). Si el TTM está 8 pp o más bajo el objetivo y los ingresos no caen (posible cargo extraordinario), el pesimista no se ancla al TTM. Si la empresa
+  El margen EBIT converge desde el TTM al objetivo (mediana histórica por defecto; opciones: TTM, analistas, manual); en los escenarios el objetivo se mueve ∓15 % (relativo). Si el TTM está 8 pp o más bajo el objetivo y los ingresos no caen (posible cargo extraordinario), la proyección arranca del margen normal y no del TTM (y la tasa de impuestos arranca de la marginal del país); el pesimista tampoco se ancla al TTM. Si la empresa
   tiene pérdida operativa, converge a su propio nivel de años rentables (con tope de 1,5× el margen de la industria) o, si nunca fue rentable, al margen promedio de su industria. El impuesto converge de la tasa efectiva a la **marginal del país**
   (tabla de Damodaran) en 5 años. La **reinversión sale solo del crecimiento**: reinversión = *g* / ROIC, con un ROIC inicial normalizado (calculado con el margen objetivo, no con el EBIT del TTM, que puede estar distorsionado por cargos extraordinarios) que converge al
   **ROIC terminal**: con datos de industria, *Amplio* = ROC del sector (Damodaran), *Estrecho* = punto medio con el costo del capital,

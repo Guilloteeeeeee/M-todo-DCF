@@ -761,11 +761,16 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         warns.append(f"La empresa tiene pérdida operativa (EBIT TTM ≤ 0): el valor supone que el margen llega a "
                      f"{m_ref:.1%} ({m_desc}). Es un escenario, no una estimación: revisalo con cuidado.")
 
+    m_start, ttm_norm = m0, False                        # margen de partida de la proyección
     if not loss:
         _, m_med, _ = margin_target(co, p, replace(scen, m_rule="base"))
         if ttm_distorted(co, m0, m_med):
+            # Damodaran: lo extraordinario se normaliza. Se arranca del margen normal (el del caso base, igual en los tres
+            # escenarios) y no del TTM deprimido; el objetivo de cada escenario se alcanza igual en `margin_years`.
+            m_start, ttm_norm = m_med, True
             warns.append(f"El margen del TTM ({m0:.1%}) está {(m_med - m0) * 100:.0f} pp bajo el objetivo ({m_med:.1%}) y los ingresos no caen: "
-                         "puede ser un cargo extraordinario de un año. El escenario pesimista no se ancla al TTM; revisalo.")
+                         f"parece un cargo extraordinario de un año. La proyección arranca del margen normal ({m_med:.1%}) y no del TTM, "
+                         "y la tasa de impuestos también arranca de la marginal del país. Revisalo.")
 
     c = cost_of_capital(co, p, scen, warns)
     wacc, ke = c["wacc"], c["ke"]
@@ -787,7 +792,12 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     if loss:
         tax0 = p.marginal_tax
     tax_target = p.marginal_tax                          # la tasa efectiva converge a la marginal del país
+    nopat_ttm = co.ebit_ttm * (1 - tax0) if not loss else co.revenue_ttm * m_ref * (1 - tax0)   # el que reportó el TTM
+    if ttm_norm:
+        tax0 = p.marginal_tax                            # la tasa efectiva del TTM también está distorsionada por el cargo
     nopat0 = co.ebit_ttm * (1 - tax0) if not loss else co.revenue_ttm * m_ref * (1 - tax0)
+    if ttm_norm:
+        nopat0 = co.revenue_ttm * m_start * (1 - tax0)   # NOPAT normalizado de partida
     nonop = co.non_op_assets if p.include_nonop else 0.0
     # Capital invertido OPERATIVO (criterio Damodaran): deuda + patrimonio - caja - inversiones no operativas
     debt_ic = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
@@ -814,7 +824,7 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         roic0 = p.roic_cap
         warns.append("Sin capital invertido utilizable: ROIC inicial = tope.")
     if not loss and co.capex_ttm is not None:
-        fcf_est = nopat0 + co.da_ttm - co.capex_ttm - co.nwc_inv_ttm
+        fcf_est = nopat_ttm + co.da_ttm - co.capex_ttm - co.nwc_inv_ttm
         if fcf_est < 0:
             warns.append(f"El flujo libre estimado de los últimos 12 meses es negativo ({fcf_est:,.0f} M): "
                          "el valor depende de que la inversión actual rinda más adelante.")
@@ -857,7 +867,7 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     for t in range(1, N + 1):
         g = g_path(t)
         rev *= (1 + g)
-        m = m0 + (mT - m0) * min(1.0, t / my)
+        m = m_start + (mT - m_start) * min(1.0, t / my)
         tax = tax0 + (tax_target - tax0) * min(1.0, t / 5)
         roic = roic0 + (roicT - roic0) * t / N
         ebit = rev * m
@@ -913,7 +923,7 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         discount_rate=wacc, ke=ke, g_terminal=gT, tv_share=tv_share, table=rows, warnings=warns,
         extras=dict(wacc=wacc, wacc_T=wacc_T, ke=ke, kd=c["kd"], kd_note=c.get("kd_note", ""), we=c["we"], wd=c["wd"],
                     beta=c["beta"], rf=c["rf"],
-                    g1=g1, g2=g2, g_src=g_src, margin0=m0, margin_target=mT, roic0=roic0, roicT=roicT,
+                    g1=g1, g2=g2, g_src=g_src, margin0=m0, margin_start=m_start, ttm_normalized=ttm_norm, margin_target=mT, roic0=roic0, roicT=roicT,
                     moat_label=moat_label, moat_reasons=moat_reasons, moat_src=moat_src,
                     exit_ev_ebit=exit_mult, tv_nopat=tv / nopat_N if nopat_N else float('nan'), roic_note=roic_note,
                     nopat0=nopat0, tv=tv, pv_explicit=pv_sum, pv_tv=pv_tv,

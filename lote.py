@@ -23,6 +23,7 @@ from dcf_models import Params, data_checks, field_checks, route_model, run_scena
 from industry_data import attach as attach_industry
 
 SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
+NO_APLICA_PCT = 0.02          # base < 2 % del precio -> "No aplica por DCF"
 
 SUGGESTED = (
     "AAPL, MSFT, NVDA, ORCL, INTC, CSCO, AMD, ADBE, "                 # tecnología
@@ -39,10 +40,12 @@ SUGGESTED = (
 )
 
 FLAG_HELP = {
-    "datos incompletos": "Yahoo no entregó sector, industria, país o nombre.",
+    "datos incompletos": "Yahoo no entregó sector, industria, país, nombre o la capitalización de mercado.",
+    "no confiable": "Faltan datos clave (o llegaron degradados): el Excel NO muestra valores, solo una referencia. Se reintenta solo; si persiste, probá esa empresa más tarde.",
+    "no aplica por DCF": "El valor base es menos de 2 % del precio: con estos supuestos el negocio no genera valor para el accionista (pérdidas, ROIC bajo el costo de capital). El DCF no es la herramienta adecuada.",
     "sin analistas": "No hay estimaciones de analistas de ingresos: el crecimiento sale de la historia.",
     "pérdida operativa": "EBIT del TTM ≤ 0.",
-    "TTM bajo vs mediana, ingresos estables": "El margen del TTM está 8 pp o más por debajo del objetivo y los ingresos no caen: ¿cargo extraordinario?",
+    "TTM bajo vs mediana, ingresos estables": "El margen del TTM está 8 pp o más por debajo del objetivo y los ingresos no caen: parece un cargo extraordinario. La proyección arranca del margen normal, no del TTM.",
     "TTM bajo vs mediana, ingresos caen": "El margen del TTM está 8 pp o más por debajo del objetivo y los ingresos caen: ¿deterioro real?",
     "TTM alto vs mediana": "El margen del TTM está 8 pp o más por encima del objetivo: ¿pico de ciclo?",
     "banda ancha": "Pesimista < 40 % del base u optimista > 2 veces el base.",
@@ -139,8 +142,15 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
         if n_check:
             flags.append("controles ⚠️")
         all_w = list(dict.fromkeys(list(load_warns) + data_checks(co2) + list(base.warnings)))
+        bad = data_yahoo.unreliable_reasons(co)
+        no_aplica = vb is not None and co.price > 0 and vb <= NO_APLICA_PCT * co.price
+        estado = "No confiable" if bad else ("No aplica por DCF" if no_aplica else ("Datos incompletos" if missing else "OK"))
+        if bad:
+            flags.insert(0, "no confiable")
+        elif no_aplica:
+            flags.insert(0, "no aplica por DCF")
         row.update({
-            "Estado": "Datos incompletos" if missing else "OK",
+            "Estado": estado,
             "Pesimista": vp, "Base": vb, "Optimista": vo,
             "Pes/Base": r_pb, "Opt/Base": r_ob, "Base vs precio": (vb / co.price - 1) if (vb is not None and co.price) else None,
             "WACC": wacc, "WACC terminal": _f(ex.get("wacc_T")), "Ke": _f(base.ke), "g terminal aplicado": _f(base.g_terminal),
@@ -148,14 +158,49 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
             "Margen TTM": m0, "Margen objetivo": mT, "TTM − objetivo (pp)": (d_m * 100) if d_m is not None else None,
             "ROIC inicial": _f(ex.get("roic0")), "ROIC terminal": _f(ex.get("roicT")),
             "Foso": ex.get("moat_label", ""), "Origen foso": ex.get("moat_src", ""),
+            "Etapa": base.extras.get("lifecycle", ""), "P(quiebra 10a)": _f(ex.get("p_default")) if ex.get("p_default") else None,
+            "I+D capitalizado (M)": _f(ex.get("rd_asset")),
             "VT / EV": _f(base.tv_share), "EV/EBIT salida": _f(ex.get("exit_ev_ebit")),
             "Avisos (n)": len(all_w), "Controles ⚠️ (n)": n_check, "Datos faltantes": ", ".join(missing),
             "Banderas": " · ".join(flags), "Primer aviso": (all_w[0][:160] if all_w else ""),
         })
+        if estado in ("No confiable", "No aplica por DCF"):
+            ref = "/".join("n/d" if v is None else f"{v:.2f}" for v in (vp, vb, vo))
+            row.update({"Valor ref. pes/base/opt": ref, "Pesimista": None, "Base": None, "Optimista": None,
+                        "Pes/Base": None, "Opt/Base": None, "Base vs precio": None,
+                        "Detalle": ("Motivos: " + "; ".join(bad)) if bad else
+                                   "Con estos supuestos el negocio no genera valor para el accionista: " + (base.warnings[0][:200] if base.warnings else "")})
     except Exception as e:  # noqa: BLE001
         row.update({"Estado": "ERROR de cálculo", "Detalle": f"{type(e).__name__}: {e}"[:300]})
     row["Segundos"] = round(time.time() - t0, 1)
     return row, raw
+
+
+RESCUE_STATES = ("No confiable",)
+
+
+def rescue(rows: List[dict], raws: Dict[str, str], load_fn: Callable, waits=(10.0,), sleep: Callable = time.sleep,
+           on_progress: Optional[Callable[[str], None]] = None) -> int:
+    """Vuelve a valuar, esperando entre intentos, las filas "No confiables" (Yahoo suele limitar las consultas por un rato).
+    Reemplaza la fila solo si mejora. Devuelve cuántas se recuperaron."""
+    fixed = 0
+    for wait in waits:
+        todo = [i for i, r in enumerate(rows) if r.get("Estado") in RESCUE_STATES]
+        if not todo:
+            break
+        sleep(wait)
+        for i in todo:
+            sym = str(rows[i]["Ticker"])
+            if on_progress:
+                on_progress(sym)
+            new, raw = evaluate(sym, load_fn)
+            if new.get("Estado") not in RESCUE_STATES:
+                rows[i] = new
+                if raw:
+                    raws[sym] = raw
+                fixed += 1
+            sleep(1.0)
+    return fixed
 
 
 def summarize(rows: List[dict]) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int, str]]]:
@@ -172,10 +217,10 @@ def summarize(rows: List[dict]) -> Tuple[List[Tuple[str, int]], List[Tuple[str, 
 
 
 COLUMNS = ["Ticker", "Empresa", "Estado", "Modelo", "Sector", "Industria", "País", "Industria Damodaran", "Precio", "Moneda",
-           "Pesimista", "Base", "Optimista", "Pes/Base", "Opt/Base", "Base vs precio",
+           "Pesimista", "Base", "Optimista", "Valor ref. pes/base/opt", "Pes/Base", "Opt/Base", "Base vs precio",
            "WACC", "WACC terminal", "Ke", "g terminal aplicado", "Crecim. año 1", "Fuente crecim.",
            "Margen TTM", "Margen objetivo", "TTM − objetivo (pp)", "ROIC inicial", "ROIC terminal",
-           "Foso", "Origen foso", "VT / EV", "EV/EBIT salida", "Avisos (n)", "Controles ⚠️ (n)",
+           "Foso", "Origen foso", "Etapa", "P(quiebra 10a)", "I+D capitalizado (M)", "VT / EV", "EV/EBIT salida", "Avisos (n)", "Controles ⚠️ (n)",
            "Datos faltantes", "Banderas", "Primer aviso", "Detalle", "Segundos"]
 
 
@@ -202,7 +247,7 @@ def build_excel(rows: List[dict], raws: Dict[str, str]) -> bytes:
                 ws.column_dimensions[ws.cell(1, i).column_letter].width = 14 if col not in ("Empresa", "Banderas", "Primer aviso", "Detalle", "Industria") else 34
             pct = {"Pes/Base": "0.00", "Opt/Base": "0.00", "Base vs precio": "0%", "WACC": "0.00%", "WACC terminal": "0.00%", "Ke": "0.00%",
                    "g terminal aplicado": "0.00%", "Crecim. año 1": "0.0%", "Margen TTM": "0.0%", "Margen objetivo": "0.0%",
-                   "ROIC inicial": "0.0%", "ROIC terminal": "0.0%", "VT / EV": "0%", "Pesimista": "0.00", "Base": "0.00", "Optimista": "0.00"}
+                   "ROIC inicial": "0.0%", "ROIC terminal": "0.0%", "VT / EV": "0%", "P(quiebra 10a)": "0%", "Pesimista": "0.00", "Base": "0.00", "Optimista": "0.00"}
             for i, col in enumerate(df.columns, start=1):
                 if col in pct:
                     for r in range(2, ws.max_row + 1):
@@ -238,10 +283,10 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
                        help="La lista sugerida cubre todos los sectores, empresas grandes y chicas, bancos, REITs, utilities, "
                             "cíclicas, extranjeras y algunas con pérdidas.")
     c1, c2, c3 = st.columns(3)
-    tanda = c1.number_input("Empresas por tanda", 5, 60, 25, 5,
+    tanda = c1.number_input("Empresas por tanda", 5, 60, 10, 5,
                             help="Cada vez que apretás el botón se valúan las próximas empresas pendientes. "
                                  "Tandas chicas evitan que Yahoo limite las consultas.")
-    pausa = c2.number_input("Pausa entre empresas (seg)", 0.0, 10.0, 1.0, 0.5)
+    pausa = c2.number_input("Pausa entre empresas (seg)", 0.0, 10.0, 3.0, 0.5)
     go = c3.button("Valuar la próxima tanda", type="primary")
 
     tickers = parse_tickers(txt)
@@ -263,6 +308,10 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
                 table_slot.dataframe(pd.DataFrame(rows)[[c for c in COLUMNS if c in pd.DataFrame(rows).columns][:16]], **stretch)
             if pausa and i < len(batch):
                 time.sleep(float(pausa))
+        n_bad = sum(1 for r in rows if r.get("Estado") in RESCUE_STATES)
+        if n_bad:
+            bar.progress(1.0, text=f"Reintentando {n_bad} empresa(s) con datos incompletos…")
+            rescue(rows, raws, load_fn, waits=(10.0, 25.0), on_progress=lambda s_: bar.progress(1.0, text=f"Reintentando {s_}…"))
         bar.progress(1.0, text="Tanda terminada")
         pending = [t for t in tickers if t not in {str(r["Ticker"]) for r in rows}]
         st.success(f"Tanda terminada. Pendientes: {len(pending)}."
@@ -281,6 +330,11 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
         st.download_button("⬇️ Descargar el Excel del lote", build_excel(rows, raws),
                            file_name=f"Lote_DCF_{datetime.now():%Y%m%d_%H%M}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if any(r.get("Estado") in RESCUE_STATES for r in rows) and st.button("Reintentar las 'No confiables'"):
+            with st.spinner("Esperando y reintentando…"):
+                n = rescue(rows, raws, load_fn, waits=(15.0, 30.0))
+            st.success(f"Recuperadas: {n}.")
+            st.rerun()
         if st.button("Borrar resultados y empezar de cero"):
             st.session_state["lote_rows"], st.session_state["lote_raw"] = [], {}
             st.rerun()

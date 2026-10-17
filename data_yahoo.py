@@ -35,6 +35,7 @@ FLOW_FIELDS = [
     "InterestExpense", "InterestExpenseNonOperating", "TaxProvision", "PretaxIncome", "TaxRateForCalcs",
     "DepreciationAndAmortization", "ReconciledDepreciation", "CapitalExpenditure", "ChangeInWorkingCapital",
     "CommonStockDividendPaid", "CashDividendsPaid", "RepurchaseOfCapitalStock", "GainLossOnSaleOfPPE",
+    "ResearchAndDevelopment",
 ]
 BAL_FIELDS = [
     "TotalDebt", "CapitalLeaseObligations", "CashCashEquivalentsAndShortTermInvestments", "MinorityInterest",
@@ -228,6 +229,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         return None if x is None else x * fxr / 1e6
 
     mc = sf(price_m.get("marketCap")) or sf(summary.get("marketCap"))
+    cap_estimated = False
     if mc is not None and pence_div != 1.0:
         pass  # se verifica abajo contra las acciones reportadas
     rep_sh = _first(sf(keystats.get("sharesOutstanding")), F.latest("OrdinarySharesNumber"))
@@ -248,6 +250,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
                          "las acciones son las ORDINARIAS. Si cotiza como ADR, cargá 'ordinarias por ADR' "
                          "en la barra lateral (ej.: TSM = 5) o el valor por acción saldrá mal.")
         mc = shares * px
+        cap_estimated = (fin_cur != qcur) and not (adr_ratio and adr_ratio > 0)   # posible ADR con acciones ordinarias sin ajustar
         warns.append("Capitalización estimada como acciones × precio.")
     if pence_div != 1.0 and rep_sh and rep_sh > 0:
         ratio = shares / rep_sh
@@ -270,6 +273,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     div = _first(F.ttm("CommonStockDividendPaid"), F.ttm("CashDividendsPaid"))
     bb = F.ttm("RepurchaseOfCapitalStock")
     gains = F.ttm("GainLossOnSaleOfPPE")
+    rd_ttm = F.ttm("ResearchAndDevelopment")
 
     tax_eff = None
     if tax is not None and pretax is not None and pretax > 0:
@@ -309,6 +313,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     ebit_h_raw = F.annual_hist("OperatingIncome") or F.annual_hist("EBIT")
     ni_h = F.annual_hist("NetIncomeCommonStockholders") or F.annual_hist("NetIncome")
     eq_h = F.annual_hist("CommonStockEquity") or F.annual_hist("StockholdersEquity")
+    rd_h = F.annual_hist("ResearchAndDevelopment", 4)
     # alinear EBIT con ingresos por fecha
     rd = F.annual_hist_dates("TotalRevenue")
     ed = F.annual_hist_dates("OperatingIncome") or F.annual_hist_dates("EBIT")
@@ -324,7 +329,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         sector=str(profile.get("sector") or ""), industry=str(profile.get("industry") or ""),
         country=str(profile.get("country") or ""), website=str(profile.get("website") or ""), quote_type=qt,
         price=px, currency=qcur, fin_currency=fin_cur, fx=fxr,
-        shares_m=shares_m, reported_shares_m=rep_sh_m, market_cap_m=mc_m,
+        shares_m=shares_m, reported_shares_m=rep_sh_m, market_cap_m=mc_m, cap_estimated=cap_estimated,
         beta=_first(sf(summary.get("beta")), sf(keystats.get("beta")), fallback_beta), rf=rf,
         revenue_ttm=M(rev) or 0.0, ebit_ttm=M(ebit) or 0.0, da_ttm=abs(M(da) or 0.0),
         capex_ttm=abs(M(capex) or 0.0), nwc_inv_ttm=-(M(dwc) or 0.0), tax_rate_eff=tax_eff,
@@ -338,6 +343,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         equity=M(equity), ni_ttm=M(ni), ni_hist=[M(x) for x in ni_h], equity_hist=[M(x) for x in eq_h],
         dividends_ttm=abs(M(div) or 0.0), buybacks_ttm=abs(M(bb) or 0.0),
         gains_adj_ttm=M(gains) or 0.0,
+        rd_ttm=abs(M(rd_ttm) or 0.0), rd_hist=[abs(M(x)) for x in rd_h if x is not None],
         target_price=sf(fin.get("targetMeanPrice")),
         n_analysts=int(sf(fin.get("numberOfAnalystOpinions")) or 0) or None,
         ttm_source=src, asof=str(asof.date()) if asof is not None else "",
@@ -530,6 +536,20 @@ def missing_fields(co: CompanyData) -> List[str]:
         out.append("país")
     if not co.name or co.name.upper() == (co.ticker or "").upper():
         out.append("nombre")
+    if co.cap_estimated:
+        out.append("capitalización de mercado (posible ADR sin ajustar)")
+    return out
+
+
+def unreliable_reasons(co: CompanyData) -> List[str]:
+    """Motivos por los que el valor NO es confiable (lista vacía = confiable). Falta solo el país: se acepta con aviso,
+    salvo que además no hayan llegado los estimados de analistas (señal de que Yahoo bloqueó varios módulos a la vez)."""
+    if co.quote_type and co.quote_type != "EQUITY":
+        return []
+    miss = missing_fields(co)
+    out = [f"falta {m}" for m in miss if m != "país"]
+    if "país" in miss and co.rev_g_y0 is None and co.rev_g_y1 is None:
+        out.append("faltan país y estimaciones de analistas (Yahoo bloqueó módulos)")
     return out
 
 
