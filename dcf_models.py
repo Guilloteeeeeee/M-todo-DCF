@@ -644,8 +644,10 @@ def _guard_g(g: float, r: float, warns: List[str], label: str = "tasa", gap: flo
 # Modelo 1: FCFF
 # ----------------------------------------------------------------------------
 def terminal_growth_default(rf: float) -> float:
-    """g terminal automático: tasa libre de riesgo − 1 punto, entre PIB nominal − 0,5 (3,5 %) y 4,0 %."""
-    return clamp(rf - 0.01, 0.035, 0.04)
+    """g terminal automático: tasa libre de riesgo − 1 punto, entre 3,0 % y 3,5 %.
+    El techo (3,5 %) queda por debajo del crecimiento nominal de la economía (~3,8–4,1 %: PIB real 1,8 % del CBO más inflación 2,0–2,3 %),
+    porque una empresa sola no crece para siempre como toda la economía. El piso (3,0 %) es el valor que usa Dorsey."""
+    return clamp(rf - 0.01, 0.03, 0.035)
 
 
 # ----------------------------------------------------------------------------
