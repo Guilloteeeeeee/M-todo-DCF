@@ -15,7 +15,7 @@ import streamlit as st
 import data_yahoo
 from country_risk import country_crp
 from country_tax import marginal_tax_for
-from industry_data import (IND, ERP_IMPLIED_2025, DATE as IND_DATE, DATE_ISO as IND_DATE_ISO,
+from industry_data import (IND, ERP_DAMODARAN, ERP_DATE, ERP_MAX_MESES, erp_is_stale, DATE as IND_DATE, DATE_ISO as IND_DATE_ISO,
                            attach as attach_industry, get_ref, industry_names)
 from dcf_models import (MOAT_SPREADS, field_checks, margin_options, Params, data_checks, route_model, run_scenarios,
                         sensitivity, terminal_growth_default)
@@ -58,7 +58,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.25 · 17/10/2026"
+APP_VERSION = "v2.29 · 17/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -208,12 +208,13 @@ with st.sidebar:
     horizon = st.slider("Horizonte explícito (años)", 5, 15, 10, key=K("horizon"))
     g_term_in = st.number_input("Crecimiento terminal g (%) — 0 = automático", 0.0, 4.5, 0.0, 0.25, key=K("gterm"),
                                 help="Crecimiento perpetuo después del último año proyectado. Automático: tasa libre de riesgo − 1 punto, "
-                                     "entre 3,5 % (PIB nominal de EE.UU. ~4 % menos 0,5) y 4,0 % (techo: ninguna empresa crece para siempre "
-                                     "más que la economía). Para flujos en euros (~3 %), yenes o francos suizos (~1,5–2,5 %) conviene "
+                                     "entre 3,0 % y 3,5 % (techo por debajo del PIB nominal de EE.UU., ~3,8–4,1 %: una empresa sola no crece para siempre "
+                                     "como toda la economía). Para flujos en euros (~3 %), yenes o francos suizos (~1,5–2,5 %) conviene "
                                      "cargar uno menor a mano.") / 100
-    erp = st.number_input("Prima de riesgo de mercado (%)", 3.0, 8.0, 4.25, 0.25, key=K("erp"),
-                          help=f"Referencia: la prima implícita de EE.UU. a fin de 2025 es {ERP_IMPLIED_2025:.2%} (Damodaran). "
-                               "Por defecto se usa 4,25 %.") / 100
+    erp = st.number_input("Prima de riesgo de mercado (%)", 3.0, 8.0, round(ERP_DAMODARAN * 100, 2), 0.05, key=K("erp"),
+                          format="%.2f",
+                          help=f"Por defecto: la prima implícita de EE.UU. de Damodaran ({ERP_DAMODARAN:.2%}, {ERP_DATE}), medida sobre el bono "
+                               f"a 10 años. Se actualiza a mano cada 4-6 meses; la app avisa pasados {ERP_MAX_MESES} meses.") / 100
     crp_auto = st.checkbox("Prima de riesgo país automática", value=True, key=K("crpauto"),
                            help="Según el país de la empresa, con la tabla de Damodaran (enero 2026). "
                                 "EE.UU., Europa desarrollada y Japón dan casi 0; emergentes suman varios puntos.")
@@ -396,7 +397,7 @@ if (model_choice == "auto" and model == "FCFF" and not base.ok and "EBIT" in bas
     res = run_scenarios(co, p, model)
     base = res["Base"]
 
-_g_txt = "cargado por vos" if g_term_in > 0 else "automático: tasa libre de riesgo − 1 punto, entre 3,5 % y 4,0 %"
+_g_txt = "cargado por vos" if g_term_in > 0 else "automático: tasa libre de riesgo − 1 punto, entre 3,0 % y 3,5 %"
 if base.ok and abs(base.g_terminal - g_used) > 5e-5:
     g_slot.write(f"**Crecimiento terminal:** {g_used:.2%} pedido ({_g_txt}) → **{base.g_terminal:.2%} aplicado**: "
                  "el modelo mantiene una distancia mínima con la tasa de descuento (ver avisos).")
@@ -413,6 +414,12 @@ if crp_auto and (not co.country or "no figura" in crp_note):
 if g_used > 0.03 and (co.currency or "").upper() in ("EUR", "JPY", "CHF", "SEK", "DKK", "NOK") :
     all_warns.append(f"Crecimiento terminal de {g_used:.2%} con cotización en {co.currency}: el crecimiento nominal de largo plazo "
                      "de esa economía es menor (≈1,5–3 %). Considerá cargar un g menor en la barra lateral.")
+try:
+    if erp_is_stale():
+        all_warns.append(f"La prima de riesgo de mercado cargada ({ERP_DAMODARAN:.2%}) es de {ERP_DATE} y tiene más de {ERP_MAX_MESES} meses: "
+                         "conviene actualizarla con la prima implícita vigente de Damodaran (ERPbymonth, columna ERP T12m).")
+except Exception:  # noqa: BLE001
+    pass
 try:
     if (date.today() - date.fromisoformat(IND_DATE_ISO)).days > 365:
         all_warns.append(f"Las tablas de Damodaran (prima de riesgo país, industrias, impuestos) son de {IND_DATE} y tienen más "
@@ -774,11 +781,11 @@ with t5:
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
   ingreses. Lo retenido se reinvierte a Ke + spread, de ahí sale el crecimiento. Se descuenta a Ke.
 
-**Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). β = beta de la industria (Damodaran) re-apalancada con
+**Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). La prima de mercado es la implícita de EE.UU. de Damodaran (3,70 % a oct-2026; se actualiza a mano cada 4-6 meses y la app avisa si tiene más de 6 meses). β = beta de la industria (Damodaran) re-apalancada con
 la deuda de la empresa (el promedio de muchas empresas tiene mucho menos error que la regresión de una sola); sin datos de industria, beta de la acción con
 ajuste de Blume (0,67·β + 0,33), sin piso (una beta propia ≤ 0 se considera no confiable y se usa 1,0). Kd = tasa libre de riesgo + spread de calificación sintética
 (según cobertura de intereses; tope BBB en utilities y REITs). Ponderado con capitalización y deuda (con arrendamientos si corresponde).
-**Crecimiento terminal:** tasa libre de riesgo − 1 punto, entre 3,5 % (PIB nominal de EE.UU. ≈ 3,8–4 % según el CBO, menos 0,5) y 4,0 %.
+**Crecimiento terminal:** tasa libre de riesgo − 1 punto, entre 3,0 % y 3,5 %. El techo queda por debajo del crecimiento nominal de la economía de EE.UU. (≈ 3,8–4,1 %: PIB real 1,8 % según el CBO más inflación de 2,0–2,3 %), porque una empresa sola no crece para siempre como toda la economía.
 
 **ADRs y acciones extranjeras.** Los estados se convierten a la moneda de cotización a tipo spot. Las acciones se calculan como
 capitalización ÷ precio, lo que respeta el ratio del ADR y las clases múltiples. Precios en centavos (GBp, ZAc) se pasan a unidad.

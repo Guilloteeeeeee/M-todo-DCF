@@ -20,7 +20,7 @@ import data_yahoo
 from country_risk import country_crp
 from country_tax import marginal_tax_for
 from dcf_models import Params, data_checks, field_checks, route_model, run_scenarios, terminal_growth_default
-from industry_data import attach as attach_industry
+from industry_data import attach as attach_industry, ERP_DAMODARAN
 
 SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
 NO_APLICA_PCT = 0.02          # base < 2 % del precio -> "No aplica por DCF"
@@ -87,7 +87,7 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
         crp, _ = country_crp(co.country)
         g_req = terminal_growth_default(co.rf)
         model, _ = route_model(co)
-        p = Params(horizon=10, g_terminal=g_req, erp=0.0425, crp=crp, moat="auto", marginal_tax=tax, margin_mode="median",
+        p = Params(horizon=10, g_terminal=g_req, erp=ERP_DAMODARAN, crp=crp, moat="auto", marginal_tax=tax, margin_mode="median",
                    margin_years=5, persistence=0.5, affo_ratio=0.90, include_nonop=True, use_industry_beta=True)
         co2, ind_name, _ = attach_industry(co, model, None)
         res = run_scenarios(co2, p, model)

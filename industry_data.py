@@ -1,5 +1,21 @@
 """Promedios por industria de Damodaran (enero 2026): US y Global. Generado desde sus planillas."""
-ERP_IMPLIED_2025 = 0.0423   # prima implícita de EE.UU. a fin de 2025 (Damodaran, histimpl)
+# Prima de riesgo de mercado (prima implícita de EE.UU., Damodaran, ERPbymonth: "ERP (T12m)" de oct-2026, medida sobre el bono crudo a 10 años).
+# Se actualiza A MANO cada 4-6 meses: cambiar los dos valores de abajo. La app avisa cuando pasan más de ERP_MAX_MESES.
+ERP_DAMODARAN = 0.0370
+ERP_DATE = "octubre 2026"
+ERP_DATE_ISO = "2026-10-01"
+ERP_MAX_MESES = 6
+
+
+def erp_age_days(today=None) -> int:
+    """Días desde la fecha de la prima de Damodaran cargada en ERP_DATE_ISO."""
+    from datetime import date
+    return ((today or date.today()) - date.fromisoformat(ERP_DATE_ISO)).days
+
+
+def erp_is_stale(today=None) -> bool:
+    """True si la prima cargada tiene más de ERP_MAX_MESES meses (≈ 30,4 días por mes)."""
+    return erp_age_days(today) > ERP_MAX_MESES * 30.4
 DATE = "enero 2026"
 DATE_ISO = "2026-01-01"   # fecha de las tablas de Damodaran (la app avisa si pasaron más de 12 meses)
 IND = {
