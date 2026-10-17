@@ -2735,15 +2735,25 @@ def industry_names():
     return sorted(IND)
 
 
+MIN_MUESTRA_US = 20   # empresas mínimas en la muestra de EE.UU. para usarla; si hay menos, se usa la global
+
+
 def get_ref(name, country=""):
     """Devuelve (dict, 'US'|'Global') para la industria; US si la empresa es de EE.UU. o no se sabe el país."""
     if not name or name not in IND:
         return None, ""
     us = (country or "").strip().lower() in ("", "united states", "usa", "us")
     order = ("us", "gl") if us else ("gl", "us")
+    chica = False
+    if us:
+        u, g = IND[name].get("us") or {}, IND[name].get("gl") or {}
+        # Regla A (decidida el 17/10/2026): con menos de MIN_MUESTRA_US empresas en EE.UU., el promedio es ruidoso:
+        # se usa la muestra global (si tiene más empresas y trae beta).
+        if (u.get("n") or 0) < MIN_MUESTRA_US and g.get("beta") is not None and (g.get("n") or 0) > (u.get("n") or 0):
+            order, chica = ("gl", "us"), True
     for r in order:
         if IND[name].get(r) and IND[name][r].get("beta") is not None:
-            return IND[name][r], "EE.UU." if r == "us" else "Global"
+            return IND[name][r], ("EE.UU." if r == "us" else ("Global, por muestra chica en EE.UU." if chica else "Global"))
     return None, ""
 
 

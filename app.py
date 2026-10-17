@@ -17,7 +17,7 @@ from country_risk import country_crp
 from country_tax import marginal_tax_for
 from industry_data import (IND, ERP_DAMODARAN, ERP_DATE, ERP_MAX_MESES, erp_is_stale, DATE as IND_DATE, DATE_ISO as IND_DATE_ISO,
                            attach as attach_industry, get_ref, industry_names)
-from dcf_models import (MOAT_SPREADS, field_checks, margin_options, Params, data_checks, route_model, run_scenarios,
+from dcf_models import (MOAT_SPREADS, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model, run_scenarios,
                         sensitivity, terminal_growth_default)
 
 def _stretch():
@@ -58,7 +58,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.29 · 17/10/2026"
+APP_VERSION = "v2.32 · 17/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -99,21 +99,57 @@ def money(x, cur="", d=2):
     return "n/d" if x is None or x != x else f"{x:,.{d}f} {cur}".strip()
 
 
-def verdict(price, res):
-    """Frase simple: dónde está el precio respecto de los tres escenarios."""
+ZONE_COLORS = ["#1a7f37", "#7cc242", "#f2c230", "#f28c28", "#d63a2f"]
+ZONE_PHRASES = [
+    "🟢 **Muy infravalorada:** el precio está por debajo incluso del escenario pesimista.",
+    "🟢 **Infravalorada:** el precio está entre el escenario pesimista y el punto medio hacia el base.",
+    "🟡 **Bien valuada:** el precio está cerca del caso base, dentro del rango razonable de los escenarios.",
+    "🟠 **Sobrevalorada:** el precio está entre el punto medio hacia el optimista y el escenario optimista: el mercado ya descuenta casi lo mejor.",
+    "🔴 **Muy sobrevalorada:** el precio está por encima del escenario optimista: el mercado paga más que el mejor caso del modelo.",
+]
+
+
+def zones_of(price, res):
     vp, vb, vo = (res[n].per_share if res[n].ok else None for n in SCEN_ORDER)
-    if vp is not None and price < vp:
-        return "🟢 El precio está por **debajo incluso del escenario pesimista**: margen de seguridad amplio según el modelo."
-    if vb is not None and price < vb:
-        return "🟢 El precio está **entre el pesimista y el base**: cotiza con descuento frente al caso base."
-    if vo is not None and price < vo:
-        return "🟡 El precio está **entre el base y el optimista**: el mercado ya descuenta parte del escenario favorable."
-    if vo is not None:
-        return "🔴 El precio está **por encima del optimista**: el mercado paga más que el mejor escenario del modelo."
-    return "El precio supera al caso base y no hay escenario optimista disponible."
+    return price_zones(vp, vb, vo, price)
 
 
-def build_excel(co, res, base, sens, p, model, mos):
+def verdict(price, res):
+    """Frase simple: en qué zona está el precio respecto de los tres escenarios."""
+    z = zones_of(price, res)
+    if z is None:
+        return "No hay los tres escenarios disponibles para ubicar el precio."
+    return ZONE_PHRASES[z["zone"]]
+
+
+def zone_bar_html(z, price, cur=""):
+    """Barra de 5 colores con el precio actual como marcador (HTML simple, sin librerías)."""
+    cuts, base = z["cuts"], z["base"]
+    lo = min(cuts[0], price) * 0.8
+    hi = max(cuts[3], price) * 1.1
+    if hi <= lo:
+        hi = lo + 1.0
+    span = hi - lo
+    edges = [lo] + cuts + [hi]
+    pos = lambda v: max(0.0, min(100.0, (v - lo) / span * 100))
+    segs = "".join(f'<div style="width:{(edges[k + 1] - edges[k]) / span * 100:.3f}%;background:{ZONE_COLORS[k]}" '
+                   f'title="{ZONE_NAMES[k]}"></div>' for k in range(5))
+    def tick(v, name):
+        return (f'<div style="position:absolute;left:{pos(v):.2f}%;top:22px;transform:translateX(-50%);text-align:center;'
+                f'font-size:11px;line-height:1.25;white-space:nowrap">{name}<br><b>{v:,.2f}</b></div>')
+    pr = (f'<div style="position:absolute;left:{pos(price):.2f}%;top:-34px;transform:translateX(-50%);text-align:center;'
+          f'font-size:12px;font-weight:700;line-height:1.1;white-space:nowrap">Precio {price:,.2f} {cur}<br>▼</div>')
+    if cuts[3] <= 0:        # los tres escenarios valen 0: una sola etiqueta en vez de tres encimadas
+        ticks = ('<div style="position:absolute;left:0;top:22px;font-size:11px;white-space:nowrap">'
+                 'Pesimista, base y optimista: <b>0</b> por acción</div>')
+    else:
+        ticks = tick(cuts[0], "Pesimista") + tick(base, "Base") + tick(cuts[3], "Optimista")
+    return ('<div style="position:relative;margin:42px 14px 52px 14px;">' + pr +
+            f'<div style="display:flex;height:18px;border-radius:9px;overflow:hidden;border:1px solid rgba(128,128,128,.4)">{segs}</div>' +
+            ticks + '</div>')
+
+
+def build_excel(co, res, base, sens, p, model):
     """Excel con resultados, supuestos, proyección base y sensibilidad (para guardar o comparar empresas)."""
     buf = io.BytesIO()
     resumen = pd.DataFrame([{"Escenario": n, "Valor por acción": res[n].per_share if res[n].ok else None,
@@ -126,7 +162,7 @@ def build_excel(co, res, base, sens, p, model, mos):
         ("Tasa libre de riesgo", p.rf if p.rf is not None else co.rf), ("Prima de mercado", p.erp),
         ("Prima de riesgo país", p.crp), ("Tasa marginal de impuestos", p.marginal_tax),
         ("Foso (moat)", base.extras.get("moat_label", p.moat) if base.extras else p.moat), ("g terminal", p.g_terminal),
-        ("Horizonte (años)", p.horizon), ("Margen de seguridad", mos),
+        ("Horizonte (años)", p.horizon),
         ("Datos al", co.asof), ("Fuente TTM", co.ttm_source), ("Generado", datetime.now().strftime("%Y-%m-%d %H:%M")),
     ], columns=["Parámetro", "Valor"])
     controles = pd.DataFrame([{"Estado": {"ok": "OK", "aviso": "REVISAR", "info": "Dato faltante"}[c["Estado"]],
@@ -134,7 +170,7 @@ def build_excel(co, res, base, sens, p, model, mos):
                               for c in field_checks(co, model, p)])
     leyenda = pd.DataFrame([("Azul", "Dato importado"), ("Amarillo", "Supuesto (editable o estimación de la app)"),
                             ("Verde", "Cálculo")], columns=["Color", "Significado"])
-    _supuestos = ("Prima de mercado", "Foso (moat)", "g terminal", "Horizonte (años)", "Margen de seguridad")
+    _supuestos = ("Prima de mercado", "Foso (moat)", "g terminal", "Horizonte (años)")
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         resumen.to_excel(xw, sheet_name="Resumen", index=False)
         params.to_excel(xw, sheet_name="Parametros", index=False)
@@ -226,8 +262,6 @@ with st.sidebar:
                              "para siempre. Automático: la app lo estima con tres criterios (exceso de retorno sobre el costo del capital, persistencia del margen "
                              "y comparación con sus pares); abajo del resultado ves las razones. Podés forzar Ninguno / Estrecho / Amplio. "
                              "Es el supuesto que más mueve el valor.")
-    mos = st.slider("Margen de seguridad deseado (%)", 0, 50, 21, key=K("mos"),
-                    help="Descuento que exigís sobre el valor del escenario Base para considerar comprar. Por defecto 21 % (criterio de Graham). Es fijo: lo elegís vos.") / 100
     allow_annual = st.checkbox("Permitir último año fiscal si no hay TTM", value=False, key=K("annual"),
                                help="Por defecto se exigen datos de los últimos 12 meses (TTM).")
     adr_ratio = st.number_input("Acciones ordinarias por ADR (0 = no es ADR / automático)", 0.0, 1000.0, 0.0, 1.0, key=K("adr"),
@@ -459,12 +493,22 @@ if base.extras.get("p_default"):
     st.warning(f"⚠️ **Riesgo de quiebra:** calificación sintética {base.extras['rating']}; el valor ya está multiplicado por "
                f"(1 − {base.extras['p_default']:.0%}). Como negocio en marcha valdría {money(base.extras['per_share_going'], co.currency)} por acción (Base).")
 
-buy = base.per_share * (1 - mos)
-st.write(f"**Precio de compra con {mos:.0%} de margen de seguridad sobre el escenario Base:** "
-         f"{money(buy, co.currency)}  ·  precio actual: {money(co.price, co.currency)} "
-         f"({'por debajo ✅' if co.price <= buy else 'por encima'} de ese nivel)")
-
+_z = zones_of(co.price, res)
+if _z is not None:
+    st.markdown(zone_bar_html(_z, co.price, co.currency), unsafe_allow_html=True)
+    st.caption("Zonas calculadas con los tres escenarios de esta empresa (pesimista, base y optimista): cuanto más incierta, más ancha la zona del medio.")
 st.markdown(verdict(co.price, res))
+if model == "FCFF":
+    _imp = implied_wacc(co, p, model)
+    if _imp is None:
+        st.caption("🔁 **DCF inverso:** no se puede calcular (el valor da 0 o el precio queda fuera del rango de búsqueda).")
+    else:
+        _dif = _imp["wacc_model"] - _imp["wacc"]
+        _lec = ("el mercado descuenta menos que este modelo, o espera flujos mejores que los nuestros" if _dif > 0.0025 else
+                "el mercado exige más retorno que este modelo, o espera flujos peores que los nuestros" if _dif < -0.0025 else
+                "el modelo y el mercado coinciden")
+        st.caption(f"🔁 **DCF inverso:** con los flujos de este modelo, el precio actual equivale a un WACC inicial de **{_imp['wacc']:.2%}** "
+                   f"(el modelo usa {_imp['wacc_model']:.2%}): {_lec}. No distingue si la diferencia está en la tasa o en los flujos.")
 if model in ("FCFF", "REIT") and co.rev_g_y0 is None and co.rev_g_y1 is None and growth_override is None:
     st.warning("**Confianza menor:** sin acceso a estimaciones de analistas, proyecciones basadas en la mediana histórica de crecimiento. "
                f"Podés mirarlas vos en [Yahoo Finance](https://finance.yahoo.com/quote/{co.ticker}/analysis) o en "
@@ -472,7 +516,7 @@ if model in ("FCFF", "REIT") and co.rev_g_y0 is None and co.rev_g_y1 is None and
                "años 1 y 2 en Ajustes avanzados (opcional).")
 sens = sensitivity(co, p, model)
 st.download_button("⬇️ Descargar resultado en Excel",
-                   build_excel(co, res, base, sens, p, model, mos),
+                   build_excel(co, res, base, sens, p, model),
                    file_name=f"DCF_{co.ticker}_{datetime.now():%Y%m%d}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -781,7 +825,7 @@ with t5:
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
   ingreses. Lo retenido se reinvierte a Ke + spread, de ahí sale el crecimiento. Se descuenta a Ke.
 
-**Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). La prima de mercado es la implícita de EE.UU. de Damodaran (3,70 % a oct-2026; se actualiza a mano cada 4-6 meses y la app avisa si tiene más de 6 meses). β = beta de la industria (Damodaran) re-apalancada con
+**Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). La prima de mercado es la implícita de EE.UU. de Damodaran (3,70 % a oct-2026; se actualiza a mano cada 4-6 meses y la app avisa si tiene más de 6 meses). β = beta de la industria (Damodaran; muestra de EE.UU., o la global si la de EE.UU. tiene menos de 20 empresas) re-apalancada con
 la deuda de la empresa (el promedio de muchas empresas tiene mucho menos error que la regresión de una sola); sin datos de industria, beta de la acción con
 ajuste de Blume (0,67·β + 0,33), sin piso (una beta propia ≤ 0 se considera no confiable y se usa 1,0). Kd = tasa libre de riesgo + spread de calificación sintética
 (según cobertura de intereses; tope BBB en utilities y REITs). Ponderado con capitalización y deuda (con arrendamientos si corresponde).

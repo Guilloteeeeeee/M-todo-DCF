@@ -571,6 +571,57 @@ def test_erp_damodaran_constante_y_aviso_de_antiguedad():
     assert idt.erp_age_days(date(2026, 10, 1)) == 0
 
 
+def test_zonas_de_valuacion():
+    from dcf_models import price_zones
+    # escenarios 70 / 100 / 140 -> cortes 70, 85, 120, 140
+    z = price_zones(70, 100, 140, 60);   assert z["zone"] == 0 and z["name"] == "Muy infravalorada"
+    assert price_zones(70, 100, 140, 80)["zone"] == 1
+    assert price_zones(70, 100, 140, 100)["zone"] == 2
+    assert price_zones(70, 100, 140, 130)["zone"] == 3
+    assert price_zones(70, 100, 140, 140)["zone"] == 3                         # justo en el optimista
+    assert price_zones(70, 100, 140, 141)["zone"] == 4
+    assert price_zones(70, 100, 140, 100)["cuts"] == [70.0, 85.0, 120.0, 140.0]
+    assert price_zones(None, 100, 140, 100) is None and price_zones(70, 100, 140, float("nan")) is None
+    assert price_zones(0, 0, 0, 10)["zone"] == 4                                # valor 0 (patrimonio negativo): muy sobrevalorada
+    assert price_zones(140, 100, 70, 80)["zone"] == 1                           # ordena si vienen desordenados
+
+
+def test_dcf_inverso_y_pensiones_informativas():
+    from dcf_models import implied_wacc
+    co = industrial(price=80.0)
+    p = Params()
+    imp = implied_wacc(co, p, "FCFF")
+    assert imp is not None
+    # con ese desplazamiento el valor Base iguala el precio
+    r = value_company(co, replace(p, wacc_shift=imp["shift"]), "FCFF", "Base")
+    assert abs(r.per_share - 80.0) < 0.05
+    # precio más alto -> el mercado descuenta menos -> WACC implícito menor
+    imp2 = implied_wacc(industrial(price=160.0), p, "FCFF")
+    assert imp2 is not None and imp2["wacc"] < imp["wacc"]
+    # otro modelo o precio imposible -> None
+    assert implied_wacc(co, p, "ER") is None
+    assert implied_wacc(industrial(price=1e9), p, "FCFF") is None
+    # las pensiones son informativas: no cambian el valor
+    v0 = value_company(industrial(), p, "FCFF", "Base").per_share
+    v1 = value_company(industrial(pension_liab=5_000.0), p, "FCFF", "Base").per_share
+    assert abs(v0 - v1) < 1e-12
+
+
+def test_regla_beta_global_con_muestra_chica():
+    import industry_data as idt
+    # petróleo integrado: 4 empresas en EE.UU. -> usa la global (34); la regla no aplica a empresas de otros países
+    r, reg = idt.get_ref("Oil/Gas (Integrated)", "United States")
+    assert reg.startswith("Global") and r["n"] > 20
+    r2, reg2 = idt.get_ref("Oil/Gas (Integrated)", "Brazil")
+    assert reg2 == "Global" and r2["n"] == r["n"]
+    # industria con muestra grande en EE.UU.: se conserva
+    big = next(n for n, v in idt.IND.items() if (v.get("us") or {}).get("n", 0) >= idt.MIN_MUESTRA_US and v.get("gl"))
+    r3, reg3 = idt.get_ref(big, "United States")
+    assert reg3 == "EE.UU." and r3["n"] >= idt.MIN_MUESTRA_US
+    # sin país conocido se trata como EE.UU.
+    assert idt.get_ref("Oil/Gas (Integrated)", "")[1].startswith("Global")
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):
