@@ -44,6 +44,8 @@ BAL_FIELDS = [
     "NonCurrentPensionAndOtherPostretirementBenefitPlans", "PensionandOtherPostRetirementBenefitPlansCurrent",
 ]
 ALL_FIELDS = FLOW_FIELDS + BAL_FIELDS
+# Partidas solo informativas (v2.38): se piden aparte para que, si Yahoo no las tiene, no se rompa la descarga principal.
+EXTRA_BAL_FIELDS = ["AccountsReceivable", "NonCurrentAccountsReceivable"]
 
 
 # ----------------------------------------------------------------------------
@@ -79,6 +81,18 @@ def _frame(df, sym: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["asOfDate", "periodType"])
     d["asOfDate"] = pd.to_datetime(d["asOfDate"])
     return d.sort_values("asOfDate")
+
+
+def _merge_extra(df, extra, sym: str):
+    """Agrega a df (salida de get_financial_data) las columnas de `extra`; si algo falla devuelve df sin tocar."""
+    try:
+        d, e = _frame(df, sym), _frame(extra, sym)
+        cols = [c for c in e.columns if c not in ("symbol", "asOfDate", "periodType", "currencyCode") and c not in d.columns]
+        if not cols or d.empty:
+            return df
+        return d.merge(e[["asOfDate", "periodType"] + cols], on=["asOfDate", "periodType"], how="left")
+    except Exception:  # noqa: BLE001
+        return df
 
 
 def _series(df: pd.DataFrame, ptype: str, field: str) -> pd.DataFrame:
@@ -307,6 +321,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     equity = _first(F.latest("CommonStockEquity"), F.latest("StockholdersEquity"))
     ic = F.latest("InvestedCapital")
     nonop = _first(F.latest("InvestmentsAndAdvances"), F.latest("LongTermEquityInvestment"))
+    rec_cur, rec_nc = F.latest("AccountsReceivable"), F.latest("NonCurrentAccountsReceivable")   # solo informativo (financieras propias)
     if cash is None:
         warns.append("Sin dato de caja: se asumió 0.")
     if debt is None:
@@ -341,6 +356,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         revenue_hist=[M(x) for x in rev_h], ebit_hist=[M(x) for x in ebit_h],
         invested_capital=M(ic), non_op_assets=max(M(nonop) or 0.0, 0.0), cash=M(cash) or 0.0, debt=M(debt) or 0.0,
         lease_debt=min(M(lease) or 0.0, M(debt) or 0.0), minority=M(minority) or 0.0, pension_liab=M(pension),
+        receivables=M(rec_cur), receivables_nc=M(rec_nc),
         rev_g_y0=g0, rev_g_y1=g1,
         rev_gl_y0=rng.get("gl_y0"), rev_gl_y1=rng.get("gl_y1"), rev_gh_y0=rng.get("gh_y0"), rev_gh_y1=rng.get("gh_y1"),
         eps_g_y0=rng.get("eg_y0"), eps_g_y1=rng.get("eg_y1"),
@@ -614,6 +630,12 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
         raise DataError(f"Yahoo rechazó la descarga de estados contables de '{sym}': {e}")
     if isinstance(dfa, (str, dict)) and isinstance(dfq, (str, dict)):
         raise DataError(f"Yahoo no tiene estados contables para '{sym}' (o bloqueó la consulta).")
+    try:
+        _xa = t.get_financial_data(EXTRA_BAL_FIELDS, frequency="a", trailing=False)
+        _xq = t.get_financial_data(EXTRA_BAL_FIELDS, frequency="q", trailing=False)
+        dfa, dfq = _merge_extra(dfa, _xa, sym), _merge_extra(dfq, _xq, sym)
+    except Exception:  # noqa: BLE001
+        pass                                           # informativo: sin estas partidas el modelo funciona igual
 
     fb_price = fb_cur = None
     if not sf(price_m.get("regularMarketPrice")):

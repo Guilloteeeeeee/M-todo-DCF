@@ -215,6 +215,20 @@ def test_analyst_ranges_parse():
     assert analyst_ranges({}) == {}
 
 
+def test_creditos_a_cobrar_informativos():
+    """v2.38: las cuentas por cobrar (corrientes y de largo plazo) se leen aparte; si faltan, todo sigue igual."""
+    from data_yahoo import _merge_extra, build_company
+    dfa, dfq = frames()
+    xq = pd.DataFrame([dict(symbol="ABC", asOfDate="2025-06-30", periodType="3M", AccountsReceivable=60e9, NonCurrentAccountsReceivable=61e9)])
+    xq["asOfDate"] = pd.to_datetime(xq["asOfDate"])
+    dq2 = _merge_extra(dfq, xq.set_index("symbol"), "ABC")
+    co, _ = build_company("ABC", price, {}, {}, prof, {"financialCurrency": "EUR"}, trend, dfa, dq2, fx)
+    assert abs(co.receivables - 60e3 * 1.10) < 1e-6 and abs(co.receivables_nc - 61e3 * 1.10) < 1e-6, (co.receivables, co.receivables_nc)
+    co0, _ = build_company("ABC", price, {}, {}, prof, {"financialCurrency": "EUR"}, trend, dfa, dfq, fx)
+    assert co0.receivables is None and co0.receivables_nc is None
+    assert _merge_extra(dfq, "error de yahoo", "ABC") is dfq                 # fallo de Yahoo: no rompe nada
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

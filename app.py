@@ -18,12 +18,12 @@ try:
     from country_tax import marginal_tax_for
     from industry_data import (IND, ERP_DAMODARAN, ERP_DATE, ERP_MAX_MESES, erp_is_stale, DATE as IND_DATE, DATE_ISO as IND_DATE_ISO,
                                attach as attach_industry, get_ref, industry_names)
-    from dcf_models import (MOAT_SPREADS, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model,
+    from dcf_models import (MOAT_SPREADS, BETA_MIN, BETA_MAX, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model,
                             run_scenarios, sensitivity, terminal_growth_default)
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
-    _marcas = {"dcf_models.py": "ZONE_NAMES", "industry_data.py": "ERP_DAMODARAN", "data_yahoo.py": "pension_liab", "lote.py": "implied_wacc"}
+    _marcas = {"dcf_models.py": "moat_partial_premium", "industry_data.py": "ERP_DAMODARAN", "data_yahoo.py": "EXTRA_BAL_FIELDS", "lote.py": "implied_wacc"}
 
     def _tiene(archivo, marca):
         try:
@@ -83,7 +83,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.33 · 17/10/2026"
+APP_VERSION = "v2.38 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -328,9 +328,9 @@ with st.sidebar:
                                  help="Participaciones y valores de largo plazo que no generan ventas (ej.: las embotelladoras de "
                                       "KO, las inversiones de Amazon). Como el resultado operativo no las incluye, se suman aparte.")
         use_ind_beta = st.checkbox("Usar la beta de la industria (Damodaran)", value=True, key=K("indbeta"),
-                                   help="Beta promedio de las empresas del sector, ajustada por la deuda de esta empresa. Es mucho más "
-                                        "estable que la beta de una sola acción (ej.: 0,29 en KO). Si la desmarcás o no hay datos "
-                                        "del sector, se usa la de la acción con ajuste de Blume.")
+                                   help="La beta usada es el promedio entre la del sector (ajustada por la deuda de esta empresa) y la propia "
+                                        f"de la acción, con piso {BETA_MIN:.1f} y tope {BETA_MAX:.1f}. La del sector es mucho más estable que la de una sola acción "
+                                        "(ej.: 0,29 en KO). Si la desmarcás o no hay datos del sector, se usa la de la acción con ajuste de Blume.")
         cap_rd = st.checkbox("Capitalizar el gasto en I+D (Damodaran)", value=True, key=K("caprd"),
                              help="Trata el I+D como inversión (activo que se amortiza) y no como gasto: sube el resultado operativo y el capital "
                                   "invertido de farmacéuticas y tecnológicas. Usa los años de historia que entrega Yahoo (4). Sin dato de I+D no hace nada.")
@@ -766,9 +766,10 @@ with t4:
         lines += [
             ("Peso del valor terminal en el EV", pct(base.tv_share, 0), "Alerta si > 75 %"),
             ("EV/EBIT de salida implícito", f"{ex['exit_ev_ebit']:.1f}x", "Razonable: ~8–20x según sector"),
-            ("ROIC terminal vs WACC terminal", f"{pct(ex['roicT'], 1)} vs {pct(ex['wacc_T'], 1)}", f"Foso: {ex['moat_label']} ({ex['moat_src']})"),
-            ("Beta usada / Rf", f"{ex['beta']:.2f} / {pct(ex['rf'], 2)}", "Con datos de industria: beta del sector re-apalancada, sin Blume. Sin industria: Blume 0,67·β + 0,33"),
-            ("WACC: empresa → sector (terminal)", f"{pct(ex['wacc'], 2)} → {pct(ex['wacc_T'], 2)}", "El costo del capital converge al del sector entre los años 5 y N"),
+            ("ROIC terminal vs WACC terminal", f"{pct(ex['roicT'], 1)} vs {pct(ex['wacc_T'], 1)}", f"Foso: {ex['moat_label']} ({ex['moat_src']})" + (f" · premio parcial interno {ex['moat_partial']:.0%}" if ex.get('moat_partial') else "")),
+            ("Beta usada / Rf", f"{ex['beta']:.2f} / {pct(ex['rf'], 2)}", "Con datos de industria: promedio entre la beta del sector (re-apalancada) y la propia, piso 0,5 y tope 2,0. Sin industria: Blume 0,67·β + 0,33"),
+            ("Beta terminal", f"{ex['beta_T']:.2f}" if ex.get('beta_T') is not None else "n/d", "Promedio entre la beta de los primeros años (con la deuda de la industria) y 1,0: 25 % propia, 25 % industria, 50 % mercado"),
+            ("WACC: empresa → sector (terminal)", f"{pct(ex['wacc'], 2)} → {pct(ex['wacc_T'], 2)}", "El costo del capital converge al terminal (deuda de la industria, beta terminal) entre los años 5 y N"),
             ("Costo de la deuda (antes de impuestos)", pct(ex['kd'], 2), ex.get('kd_note', "")),
         ]
     elif model == "ER":
@@ -845,7 +846,7 @@ with t5:
   (tabla de Damodaran) en 5 años. La **reinversión sale solo del crecimiento**: reinversión = *g* / ROIC, con un ROIC inicial normalizado (calculado con el margen objetivo, no con el EBIT del TTM, que puede estar distorsionado por cargos extraordinarios) que converge al
   **ROIC terminal**: con datos de industria, *Amplio* = ROC del sector (Damodaran), *Estrecho* = punto medio con el costo del capital,
   *Ninguno* = costo del capital (nunca por encima del ROIC actual; *Amplio* y *Estrecho* tienen un piso de WACC + 3 / + 2 pp); sin datos, WACC + 0/2/5 pp. Así el crecimiento solo vale si hay
-  ventaja competitiva. El **foso se estima automáticamente** con tres criterios (exceso de retorno: ROIC ≥ WACC del sector + 5 pp, obligatorio porque para Damodaran el foso es un retorno sostenidamente por encima del costo del capital; persistencia de los márgenes recientes; y ser mejor que sus pares en margen o retorno). Las productoras de materias primas y aerolíneas quedan limitadas a Estrecho; se puede forzar a mano. Si el valor del patrimonio da negativo se muestra 0 (responsabilidad limitada). El **WACC converge** del de la empresa al del sector: constante hasta el año 5 y luego
+  ventaja competitiva. El **foso se estima automáticamente** con tres criterios (exceso de retorno: ROIC ≥ WACC del sector + 5 pp, obligatorio porque para Damodaran el foso es un retorno sostenidamente por encima del costo del capital; persistencia de los márgenes recientes; y ser mejor que sus pares en margen o retorno). Las productoras de materias primas y aerolíneas quedan limitadas a Estrecho; se puede forzar a mano. Para que no haya un salto brusco en el umbral, una empresa clasificada *Ninguno* que rinde por encima del WACC del sector pero no llega a ese umbral recibe en el valor terminal una fracción del retorno extra de un foso *Estrecho* (proporcional a qué tan cerca está del umbral); es un cálculo interno, y la clasificación que se muestra sigue siendo Amplio / Estrecho / Ninguno (si el premio parcial llega al 50 % o más, se muestra Estrecho, pero el cálculo usa el porcentaje exacto). Si el capital operativo da cero o negativo porque las inversiones no operativas superan al capital invertido, el ROIC se calcula con el capital sin restarlas (se avisa). Si el valor del patrimonio da negativo se muestra 0 (responsabilidad limitada). El **WACC converge** del de la empresa al del sector: constante hasta el año 5 y luego
   lineal hasta el último año; el sector se reconstruye con las mismas tasas (Rf, prima de mercado y país) y la beta y deuda típicas de su industria.
   El capital invertido es operativo (deuda + patrimonio − caja − inversiones en otras empresas). Valor terminal de Gordon sobre
   NOPAT × (1 − g/ROIC) con el WACC del sector; el gasto en **I+D se capitaliza** (se suma al resultado operativo y se amortiza en 4 años, con el I+D no amortizado como activo); si la calificación sintética es peor que BBB el valor se multiplica por (1 − probabilidad de quiebra a 10 años) (tabla del libro de Damodaran); la distancia WACC − g se mantiene en al menos 2,5 pp.
@@ -856,9 +857,10 @@ with t5:
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
   ingreses. Lo retenido se reinvierte a Ke + spread, de ahí sale el crecimiento. Se descuenta a Ke.
 
-**Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). La prima de mercado es la implícita de EE.UU. de Damodaran (3,70 % a oct-2026; se actualiza a mano cada 4-6 meses y la app avisa si tiene más de 6 meses). β = beta de la industria (Damodaran; muestra de EE.UU., o la global si la de EE.UU. tiene menos de 20 empresas) re-apalancada con
-la deuda de la empresa (el promedio de muchas empresas tiene mucho menos error que la regresión de una sola); sin datos de industria, beta de la acción con
-ajuste de Blume (0,67·β + 0,33), sin piso (una beta propia ≤ 0 se considera no confiable y se usa 1,0). Kd = tasa libre de riesgo + spread de calificación sintética
+**Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). La prima de mercado es la implícita de EE.UU. de Damodaran (3,70 % a oct-2026; se actualiza a mano cada 4-6 meses y la app avisa si tiene más de 6 meses). β = promedio simple entre la beta de la industria (Damodaran; muestra de EE.UU., o la global si la de EE.UU. tiene menos de 20 empresas) re-apalancada con
+la deuda de la empresa (el promedio de muchas empresas tiene mucho menos error que la regresión de una sola) y la beta propia de la acción, con piso 0,5 y tope 2,0
+(una beta propia ≤ 0 se considera no confiable y se usa solo la de la industria). Sin datos de industria: beta de la acción con
+ajuste de Blume (0,67·β + 0,33) y los mismos límites. El WACC terminal, al que converge el de la empresa, usa una beta que es el promedio entre la de los primeros años y 1,0 (25 % propia, 25 % industria, 50 % mercado; en crecimiento estable la beta tiende a la del mercado), desapalancada con la deuda de la empresa y re-apalancada con la deuda típica de la industria, que también da los pesos de capital. Kd = tasa libre de riesgo + spread de calificación sintética
 (según cobertura de intereses; tope BBB en utilities y REITs). Ponderado con capitalización y deuda (con arrendamientos si corresponde).
 **Crecimiento terminal:** tasa libre de riesgo − 1 punto, entre 3,0 % y 3,5 %. El techo queda por debajo del crecimiento nominal de la economía de EE.UU. (≈ 3,8–4,1 %: PIB real 1,8 % según el CBO más inflación de 2,0–2,3 %), porque una empresa sola no crece para siempre como toda la economía.
 

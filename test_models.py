@@ -262,7 +262,7 @@ def test_blume_only_without_industry_and_bbb_cap():
     assert abs(r_no.extras["ke"] - (0.04 + (0.67 * 0.7 + 0.33) * 0.045)) < 1e-9
     co2, _, _ = attach(co, "FCFF")
     r_si = fcff_value(co2, Params(), SCENARIOS["Base"])                       # con sector: sin Blume
-    assert abs(r_si.extras["ke"] - (0.04 + r_si.extras["beta"] * 0.045)) < 1e-9
+    assert abs(r_si.extras["ke"] - (0.04 + r_si.extras["beta"] * 0.045)) < 1e-9     # con sector: promedio con la propia (v2.34)
     # utility con cobertura 2x: spread tope BBB; empresa común con la misma cobertura: sin tope
     ut = industrial(industry="Utilities - Regulated Electric", ebit_ttm=1500.0, interest_expense_ttm=700.0, debt=10_000.0)
     cm = industrial(industry="Specialty Retail", ebit_ttm=1500.0, interest_expense_ttm=700.0, debt=10_000.0)
@@ -282,14 +282,53 @@ def test_industry_beta_pure():
     e2 = fcff_value(co2, Params(use_industry_beta=False), SCENARIOS["Base"]).extras
     e3 = fcff_value(co2, Params(beta=1.2), SCENARIOS["Base"]).extras
     assert e0["beta"] == 0.28 and abs(e0["ke"] - (0.04 + (0.67 * 0.28 + 0.33) * 0.045)) < 1e-9
-    assert abs(e1["beta"] - co2.ind_ubeta * (1 + 0.75 * 2000 / 10000)) < 1e-9     # no se mezcla con la propia
+    bu = co2.ind_ubeta * (1 + 0.75 * 2000 / 10000)
+    assert abs(e1["beta"] - max(0.5, min(2.0, (bu + 0.28) / 2))) < 1e-9           # v2.34: promedio con la propia, piso 0,5, tope 2,0
     assert e2["beta"] == 0.28 and e3["beta"] == 1.2
     # beta propia <= 0 sin industria: no confiable -> 1,0
     r = fcff_value(industrial(beta=-0.1), Params(), SCENARIOS["Base"])
     assert r.extras["beta"] == 1.0 and any("no es confiable" in w for w in r.warnings)
     co3, _, _ = attach(industrial(beta=None, industry="Banks - Regional", country="Brazil"), "ER")
     assert co3.ind_beta_lev and co3.ind_region == "Global"
-    print("  beta industria pura KO-like:", round(e1["beta"], 3))
+    print("  beta industria+propia KO-like:", round(e1["beta"], 3))
+
+
+def test_beta_mezcla_con_piso_y_tope():
+    from dataclasses import replace
+    from industry_data import attach
+    from dcf_models import BETA_MIN, BETA_MAX
+    assert (BETA_MIN, BETA_MAX) == (0.5, 2.0)
+    base, _, _ = attach(industrial(beta=1.0, industry="Beverages - Non-Alcoholic"), "FCFF")
+    bu = base.ind_ubeta * (1 + 0.75 * 2000 / 10000)
+
+    def beta_de(own, **kw):
+        co = replace(base, beta=own)
+        r = fcff_value(co, Params(**kw), SCENARIOS["Base"])
+        return r.extras["beta"], r.extras["ke"], r.warnings
+    # promedio simple cuando está dentro de los límites
+    b, ke, w = beta_de(1.0)
+    assert abs(b - max(0.5, (bu + 1.0) / 2)) < 1e-9 and abs(ke - (0.04 + b * 0.045)) < 1e-9 and any("promedio" in x for x in w)
+    # piso: propia muy baja + industria baja -> 0,5
+    b, _, w = beta_de(0.05)
+    assert abs(b - max(0.5, (bu + 0.05) / 2)) < 1e-9
+    if (bu + 0.05) / 2 < 0.5:
+        assert b == 0.5 and any("piso" in x for x in w)
+    # tope: propia enorme -> el promedio no pasa de 2,0
+    b, _, w = beta_de(6.0)
+    assert b <= 2.0 + 1e-12
+    big, _, _ = attach(industrial(beta=6.0, industry="Semiconductors"), "FCFF")
+    bb, _, wb = (lambda r: (r.extras["beta"], r.extras["ke"], r.warnings))(fcff_value(big, Params(), SCENARIOS["Base"]))
+    assert bb <= 2.0 + 1e-12
+    # propia ausente o <= 0: solo la industria (con límites)
+    for own in (None, -0.3, 0.0):
+        b, _, w = beta_de(own)
+        assert abs(b - max(0.5, min(2.0, bu))) < 1e-9 and any("no es confiable o falta" in x for x in w), (own, b)
+    # beta manual no se toca
+    assert beta_de(1.0, beta=0.3)[0] == 0.3
+    # sin industria: Blume con piso 0,5
+    r = fcff_value(industrial(beta=0.1), Params(), SCENARIOS["Base"])
+    assert r.extras["beta"] == 0.1 and abs(r.extras["ke"] - (0.04 + 0.5 * 0.045)) < 1e-9
+    print("  beta mezcla: industria", round(bu, 3), "→ ok")
 
 
 def test_loss_negative_fcf_and_reinvestment():
@@ -339,7 +378,9 @@ def test_wacc_converges_to_sector():
     p = Params(rf=0.0524, erp=0.0425)
     ws = sector_wacc(co2, p)
     assert ws is not None and 0.06 < ws < 0.09
-    r = fcff_value(replace(co2, debt=5_000.0), p, SCENARIOS["Base"])
+    co3 = replace(co2, debt=5_000.0)
+    ws = sector_wacc(co3, p)                  # v2.35: el WACC terminal usa la beta de la empresa (desapalancada) → depende de su deuda
+    r = fcff_value(co3, p, SCENARIOS["Base"])
     w = [row["WACC"] for row in r.table]
     assert abs(w[0] - r.extras["wacc"]) < 1e-12 and abs(w[4] - r.extras["wacc"]) < 1e-12      # constante hasta el año 5
     assert abs(w[-1] - ws) < 1e-12 and abs(r.extras["wacc_T"] - ws) < 1e-12                    # llega al del sector
@@ -349,7 +390,7 @@ def test_wacc_converges_to_sector():
     r_man = fcff_value(co2, Params(wacc_override=0.09), SCENARIOS["Base"])
     assert len({round(row["WACC"], 12) for row in r_man.table}) == 1
     # el desplazamiento de la sensibilidad mueve ambos extremos
-    r_up = fcff_value(co2, replace(p, wacc_shift=0.01), SCENARIOS["Base"])
+    r_up = fcff_value(co3, replace(p, wacc_shift=0.01), SCENARIOS["Base"])
     assert abs(r_up.extras["wacc_T"] - ws - 0.01) < 1e-12
 
 
@@ -620,6 +661,85 @@ def test_regla_beta_global_con_muestra_chica():
     assert reg3 == "EE.UU." and r3["n"] >= idt.MIN_MUESTRA_US
     # sin país conocido se trata como EE.UU.
     assert idt.get_ref("Oil/Gas (Integrated)", "")[1].startswith("Global")
+
+
+def test_beta_terminal_mercado_y_deuda_industria():
+    """v2.35: beta terminal = (beta de los primeros años, desapalancada con la deuda de la empresa y re-apalancada con la de la
+    industria + 1) / 2. Ejemplo del usuario: industria 0,8, empresa 0,3 → 0,55 → 0,775."""
+    from dataclasses import replace
+    from dcf_models import terminal_beta, sector_wacc
+    p = Params(rf=0.04, erp=0.037, marginal_tax=0.25)
+    # sin deuda en la empresa ni en la industria: el ejemplo directo
+    c = industrial(beta=0.3, debt=0.0, lease_debt=0.0, ind_ubeta=0.8, ind_de=0.0, ind_name="X")
+    assert abs(terminal_beta(c, p) - 0.775) < 1e-12
+    r = fcff_value(c, p, SCENARIOS["Base"])
+    assert abs(r.extras["beta"] - 0.55) < 1e-12 and abs(r.extras["beta_T"] - 0.775) < 1e-12
+    # deuda de la empresa igual a la de la industria: no hay efecto de reapalancar
+    c2 = industrial(beta=0.3, debt=2_000.0, lease_debt=0.0, ind_ubeta=0.8 / (1 + 0.75 * 0.2), ind_de=0.2, ind_name="X")
+    assert abs(terminal_beta(c2, p) - 0.775) < 1e-9
+    # empresa sin deuda y sector muy endeudado: la beta del negocio se re-apalanca con la deuda del sector (y se acota en 2,0)
+    c3 = industrial(beta=2.0, debt=0.0, lease_debt=0.0, ind_ubeta=1.5, ind_de=2.7, ind_name="X")
+    assert terminal_beta(c3, p) == 2.0
+    # piso: beta propia 0,1 e industria 0,6 → 0,35 → piso 0,5 → (0,5 + 1) / 2 = 0,75
+    c4 = industrial(beta=0.1, debt=0.0, lease_debt=0.0, ind_ubeta=0.6, ind_de=0.0, ind_name="X")
+    assert abs(terminal_beta(c4, p) - 0.75) < 1e-12
+    # beta propia no confiable (≤ 0) o ausente: solo industria → (0,8 + 1) / 2 = 0,9
+    for b in (None, 0.0, -0.3):
+        c5 = industrial(beta=b, debt=0.0, lease_debt=0.0, ind_ubeta=0.8, ind_de=0.0, ind_name="X")
+        assert abs(terminal_beta(c5, p) - 0.9) < 1e-12
+    # beta manual u opción de industria apagada: se conserva la beta de la industria sola (comportamiento anterior)
+    assert abs(terminal_beta(c, replace(p, beta=1.3)) - 0.8) < 1e-12
+    assert abs(terminal_beta(c, replace(p, use_industry_beta=False)) - 0.8) < 1e-12
+    # el WACC terminal usa esa beta, los pesos de la industria y el desplazamiento
+    de = 0.2
+    exp = (1 / (1 + de)) * (0.04 + terminal_beta(c2, p) * 0.037) + (1 - 1 / (1 + de)) * (0.04 + 0.0111) * 0.75
+    assert abs(sector_wacc(c2, p) - exp) < 1e-12
+    assert abs(sector_wacc(c2, replace(p, wacc_shift=0.01)) - exp - 0.01) < 1e-12
+    # sin datos de industria: no hay beta terminal
+    assert terminal_beta(industrial(), p) is None
+
+
+def test_premio_parcial_de_foso_y_capital_con_no_operativos():
+    """v2.36: (1) el premio parcial es 0 fuera del tramo entre WACC y umbral y proporcional dentro; (2) el ROIC terminal es continuo al cruzar el
+    umbral (sin escalón); (3) si las inversiones no operativas superan al capital invertido, el ROIC se calcula sin restarlas."""
+    from dcf_models import moat_partial_premium, MOAT_SPREADS
+    co = industrial(ind_roc=0.20, ind_margin=0.10)
+    # umbral = WACC sector + 5 pp = 13 %; con ROIC 10,5 % y WACC 8 %: mitad del camino
+    f, why = moat_partial_premium(co, 0.08, 0.105)
+    assert abs(f - 0.5) < 1e-9 and "Premio parcial" in why and "Ninguno" in why
+    assert moat_partial_premium(co, 0.08, 0.08)[0] == 0 and moat_partial_premium(co, 0.08, 0.05)[0] == 0
+    assert moat_partial_premium(co, 0.08, 0.13)[0] == 0 and moat_partial_premium(co, 0.08, 0.30)[0] == 0
+    assert moat_partial_premium(co, 0.08, None)[0] == 0
+    # continuidad: se barre el capital invertido (ROIC inicial de ~16 % a ~7 %) y el ROIC terminal no da saltos
+    from industry_data import attach
+    base, _, _ = attach(industrial(industry="Beverages - Non-Alcoholic"), "FCFF")
+    prev = None
+    steps = []
+    for ic in range(7_000, 22_000, 250):
+        c = replace(base, invested_capital=float(ic), equity=None)
+        r = fcff_value(c, Params(rf=0.04, erp=0.037), SCENARIOS["Base"])
+        steps.append((r.extras["roic0"], r.extras["roicT"], r.extras["moat_label"], r.extras["moat_partial"], r.per_share))
+    steps.sort()
+    jumps = [abs(b[1] - a[1]) for a, b in zip(steps, steps[1:])]
+    assert max(jumps) < 0.012, (max(jumps), steps)                      # antes del cambio había un escalón de 2 pp o más al cruzar el umbral
+    assert any(s[3] > 0 for s in steps) and all(s[2] in ("Amplio", "Estrecho", "Ninguno") for s in steps)
+    # v2.37: con premio parcial >= 50 % la etiqueta muestra Estrecho; el valor es el mismo que con la etiqueta vieja
+    lab = [(s[3], s[2]) for s in steps if s[3] > 0]
+    assert all((lab_ == "Estrecho") == (f >= 0.5) for f, lab_ in lab if lab_ != "Amplio"), lab
+    assert any(f >= 0.5 and lab_ == "Estrecho" for f, lab_ in lab) and any(f < 0.5 and lab_ == "Ninguno" for f, lab_ in lab), lab
+    # el premio parcial solo corre con clasificación automática: con foso elegido no hay premio
+    c = replace(base, invested_capital=15_000.0, equity=None)
+    r_man = fcff_value(c, Params(rf=0.04, erp=0.037, moat="Ninguno"), SCENARIOS["Base"])
+    assert r_man.extras["moat_partial"] == 0 and abs(r_man.extras["roicT"] - r_man.extras["wacc_T"]) < 1e-12
+    # capital operativo ≤ 0 por inversiones no operativas: ROIC con el capital sin restarlas, y se avisa
+    ge = industrial(equity=5_000.0, debt=2_000.0, cash=500.0, non_op_assets=9_000.0, invested_capital=None)
+    r = fcff_value(ge, Params(), SCENARIOS["Base"])
+    assert any("inversiones no operativas" in w for w in r.warnings)
+    assert 0.03 < r.extras["roic0"] < 0.40 and r.extras["ic_op"] > 0, r.extras["roic0"]
+    # si aun así el capital sigue siendo ≤ 0: tope, como antes
+    ge2 = industrial(equity=100.0, debt=0.0, cash=500.0, non_op_assets=0.0)
+    r2 = fcff_value(ge2, Params(), SCENARIOS["Base"])
+    assert r2.extras["roic0"] == Params().roic_cap
 
 
 if __name__ == "__main__":
