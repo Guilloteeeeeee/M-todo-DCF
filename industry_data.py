@@ -2757,6 +2757,9 @@ def get_ref(name, country=""):
     return None, ""
 
 
+USE_DAMODARAN_LIST = True   # v2.43: buscar primero en la planilla de Damodaran (los tests y comparaciones la pueden apagar)
+
+
 def attach(co, model, manual_name=None):
     """Devuelve (co con datos de industria, nombre de industria o None, cómo se obtuvo)."""
     from dataclasses import replace
@@ -2764,9 +2767,16 @@ def attach(co, model, manual_name=None):
     if manual_name and manual_name in IND:
         name, how = manual_name, "elegida por vos"
     else:
-        name = map_industry(getattr(co, "industry", ""))
-        if name:
-            how = f"detectada desde Yahoo ({co.industry})"
+        # v2.43: primero la planilla de Damodaran (su industria exacta para esa empresa); si no está, la regla de Yahoo.
+        if USE_DAMODARAN_LIST:
+            from damodaran_map import lookup
+            hit = lookup(getattr(co, "ticker", ""), getattr(co, "name", ""), getattr(co, "country", ""))
+            if hit and hit[0] in IND and get_ref(hit[0], getattr(co, "country", ""))[0]:
+                name, how = hit[0], f"según la planilla de Damodaran ({hit[1]})"
+        if not name:
+            name = map_industry(getattr(co, "industry", ""))
+            if name:
+                how = f"detectada desde Yahoo ({co.industry}): no figura en la planilla de Damodaran"
     ref, region = get_ref(name, getattr(co, "country", ""))
     if not ref:
         return co, None, ""

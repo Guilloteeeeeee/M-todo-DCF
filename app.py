@@ -23,7 +23,7 @@ try:
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
-    _marcas = {"dcf_models.py": "moat_partial_premium", "industry_data.py": "ERP_DAMODARAN", "data_yahoo.py": "EXTRA_BAL_FIELDS", "lote.py": "implied_wacc"}
+    _marcas = {"dcf_models.py": "moat_partial_premium", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "EXTRA_BAL_FIELDS", "lote.py": "implied_wacc"}
 
     def _tiene(archivo, marca):
         try:
@@ -83,7 +83,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.41 · 19/10/2026"
+APP_VERSION = "v2.43 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -339,7 +339,7 @@ with st.sidebar:
                                     "con la tabla de Damodaran. En una quiebra se supone que el accionista no recibe nada.")
         ind_manual = st.selectbox("Industria para comparar (Damodaran)", ["Automática"] + industry_names(),
                                   key=K("dind"),
-                                  help="Si la app no detecta la industria (pasa cuando Yahoo no la informa), elegila acá.")
+                                  help="Automática: la app busca la empresa en la planilla de Damodaran (su industria exacta) y, si no figura, usa la industria de Yahoo. Elegila acá si no la detecta o si querés compararla con otra.")
         lease_opt = st.selectbox("Arrendamientos como deuda", ["auto", "sí", "no"], key=K("lease"),
                                  help="Auto: EE.UU. = no (el gasto de alquiler ya está en el EBIT); resto = sí.")
 
@@ -857,6 +857,8 @@ with t5:
   Si ROE = Ke, el valor es exactamente el book value.
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
   ingreses. Lo retenido se reinvierte a Ke + spread, de ahí sale el crecimiento. Se descuenta a Ke.
+
+**Industria de comparación (v2.43).** La app busca cada empresa en la planilla de Damodaran «Companies in each industry» (48.156 empresas, las mismas 94 industrias de sus tablas) por ticker, por sufijo de bolsa o por nombre, y usa su industria exacta; si la empresa no figura, usa la industria de Yahoo traducida con reglas propias. La clasificación de Damodaran es por código industrial (SIC) y a veces no es la intuitiva (Alphabet y Meta en *Software (Entertainment)*; Caterpillar en *Construction Supplies*). Se puede cambiar a mano en el selector.
 
 **Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). La prima de mercado es la implícita de EE.UU. de Damodaran (3,70 % a oct-2026; se actualiza a mano cada 4-6 meses y la app avisa si tiene más de 6 meses). β = promedio simple entre la beta de la industria (Damodaran; muestra de EE.UU., o la global si la de EE.UU. tiene menos de 20 empresas) re-apalancada con
 la deuda de la empresa (el promedio de muchas empresas tiene mucho menos error que la regresión de una sola) y la beta propia de la acción, con piso 0,5 y tope 2,0

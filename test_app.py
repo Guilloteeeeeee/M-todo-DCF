@@ -114,5 +114,11 @@ rows = at.session_state["lote_rows"]
 assert [r["Ticker"] for r in rows] == ["IND", "BNK", "REI", "BAD"], rows
 assert rows[0]["Estado"] == "OK" and rows[3]["Estado"] == "ERROR de datos", [r.get("Estado") for r in rows]
 assert len(at.dataframe) >= 1
+# v2.42: si los tickers ya están hechos, aparece el botón para volver a valuarlos
+at.run()                                                # nueva interacción: ya no quedan pendientes
+redo = next(b for b in at.button if "Volver a valuar" in b.label)
+redo.click(); at.run()
+assert not at.exception, [e.value for e in at.exception]
+assert at.session_state["lote_rows"] == [], at.session_state["lote_rows"]
 print("Modo lote OK")
 print("AppTest OK")

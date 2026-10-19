@@ -116,9 +116,20 @@ def test_excel_and_parse():
     assert states[0][1] == 2
 
 
+def test_rescue_avisa_el_progreso():
+    msgs = []
+    rows = [dict(Ticker="AAA", Estado="No confiable")]
+
+    def flaky(sym):
+        raise RuntimeError("Yahoo")
+    lote.rescue(rows, {}, flaky, waits=(7.0,), sleep=lambda s: None, on_progress=msgs.append)
+    assert any("Esperando 7" in m for m in msgs) and any("Reintentando AAA" in m for m in msgs), msgs
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn(); n += 1; print("OK", name)
     print(f"{n} pruebas OK")
+

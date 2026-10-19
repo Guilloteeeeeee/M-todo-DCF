@@ -229,6 +229,36 @@ def test_creditos_a_cobrar_informativos():
     assert _merge_extra(dfq, "error de yahoo", "ABC") is dfq                 # fallo de Yahoo: no rompe nada
 
 
+def test_industria_desde_la_planilla_de_damodaran():
+    """v2.43: la industria sale de la planilla de Damodaran (por ticker, sufijo o nombre); si no figura, de la regla de Yahoo."""
+    import damodaran_map as dm
+    import industry_data as idt
+    from dcf_models import CompanyData
+    assert dm.size() > 48000
+    g = lambda *a: (dm.lookup(*a) or (None, ""))[0]
+    assert g("AAPL", "Apple Inc.", "United States") == "Computers/Peripherals"
+    assert g("GOOGL", "Alphabet Inc.", "United States") == "Software (Entertainment)"
+    assert g("V", "Visa Inc.", "United States") == "Financial Svcs. (Non-bank & Insurance)"
+    assert g("7203.T", "", "Japan") == "Auto & Truck" and g("0700.HK", "", "") == "Software (Entertainment)"   # ceros a la izquierda
+    assert g("005930.KS", "", "") == "Computers/Peripherals"                                                    # prefijo A de Corea
+    assert g("SAP.DE", "", "") == "Software (System & Application)" and g("NOVO-B.CO", "", "") == "Drugs (Pharmaceutical)"
+    assert g("TM", "Toyota Motor Corporation", "Japan") == "Auto & Truck"                                       # ADR: por nombre
+    assert dm.lookup("ZZZZ9", "Empresa Inexistente Total SA", "Chile") is None                                  # no figura
+    # attach(): planilla primero; sin planilla vuelve a la regla de Yahoo; el selector manual manda sobre todo
+    co = CompanyData(ticker="GOOGL", name="Alphabet Inc.", industry="Internet Content & Information", country="United States",
+                     sector="Communication Services", price=100, currency="USD", market_cap_m=1e6, debt=0, cash=1, equity=1, ebit_ttm=1, revenue_ttm=10)
+    _, name, how = idt.attach(co, "FCFF", None)
+    assert name == "Software (Entertainment)" and "planilla" in how, (name, how)
+    idt.USE_DAMODARAN_LIST = False
+    try:
+        _, name2, how2 = idt.attach(co, "FCFF", None)
+    finally:
+        idt.USE_DAMODARAN_LIST = True
+    assert name2 == "Software (Internet)" and "Yahoo" in how2, (name2, how2)
+    _, name3, how3 = idt.attach(co, "FCFF", "Power")
+    assert name3 == "Power" and "elegida" in how3
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

@@ -89,16 +89,18 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
         model, _ = route_model(co)
         p = Params(horizon=10, g_terminal=g_req, erp=ERP_DAMODARAN, crp=crp, moat="auto", marginal_tax=tax, margin_mode="median",
                    margin_years=5, persistence=0.5, affo_ratio=0.90, include_nonop=True, use_industry_beta=True)
-        co2, ind_name, _ = attach_industry(co, model, None)
+        co2, ind_name, ind_how = attach_industry(co, model, None)
         res = run_scenarios(co2, p, model)
         base = res["Base"]
         if (model == "FCFF" and not base.ok and "EBIT" in base.error and (co.ni_ttm or 0) > 0 and (co.equity or 0) > 0):
             model = "ER"
-            co2, ind_name, _ = attach_industry(co, model, None)
+            co2, ind_name, ind_how = attach_industry(co, model, None)
             res = run_scenarios(co2, p, model)
             base = res["Base"]
         row.update({"Empresa": co.name, "Sector": co.sector, "Industria": co.industry, "País": co.country,
-                    "Industria Damodaran": ind_name or "", "Modelo": model, "Precio": co.price, "Moneda": co.currency})
+                    "Industria Damodaran": ind_name or "",
+                    "Origen industria": ("planilla de Damodaran" if (ind_how or "").startswith("según la planilla")
+                                         else ("Yahoo (no está en la planilla)" if ind_name else "")), "Modelo": model, "Precio": co.price, "Moneda": co.currency})
         if not base.ok:
             row.update({"Estado": "No valuable", "Detalle": base.error[:300], "Datos faltantes": ", ".join(missing),
                         "Banderas": "datos incompletos" if missing else "", "Segundos": round(time.time() - t0, 1)})
@@ -198,11 +200,13 @@ def rescue(rows: List[dict], raws: Dict[str, str], load_fn: Callable, waits=(10.
         todo = [i for i, r in enumerate(rows) if r.get("Estado") in RESCUE_STATES]
         if not todo:
             break
+        if on_progress:
+            on_progress(f"Esperando {wait:.0f} s para que Yahoo afloje antes de reintentar…")
         sleep(wait)
         for i in todo:
             sym = str(rows[i]["Ticker"])
             if on_progress:
-                on_progress(sym)
+                on_progress(f"Reintentando {sym}…")
             new, raw = evaluate(sym, load_fn)
             if new.get("Estado") not in RESCUE_STATES:
                 rows[i] = new
@@ -226,7 +230,7 @@ def summarize(rows: List[dict]) -> Tuple[List[Tuple[str, int]], List[Tuple[str, 
             [(k, v, FLAG_HELP.get(k, "")) for k, v in sorted(flags.items(), key=lambda kv: -kv[1])])
 
 
-COLUMNS = ["Ticker", "Empresa", "Estado", "Modelo", "Sector", "Industria", "País", "Industria Damodaran", "Precio", "Moneda",
+COLUMNS = ["Ticker", "Empresa", "Estado", "Modelo", "Sector", "Industria", "País", "Industria Damodaran", "Origen industria", "Precio", "Moneda",
            "Pesimista", "Base", "Optimista", "Valor ref. pes/base/opt", "Pes/Base", "Opt/Base", "Base vs precio",
            "WACC", "WACC terminal", "Ke", "g terminal aplicado", "Crecim. año 1", "Fuente crecim.",
            "Margen TTM", "Margen objetivo", "TTM − objetivo (pp)", "ROIC inicial", "ROIC terminal",
@@ -329,7 +333,15 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
                    + (f" {n_bad} empresa(s) llegaron con datos incompletos: podés descargar el Excel igual, o apretar "
                       "'Reintentar las No confiables' más abajo." if n_bad else ""))
     elif go and not pending:
-        st.info("No hay tickers pendientes.")
+        st.warning("No hay tickers pendientes: todos los de la lista ya están valuados en esta sesión (aunque hayan salido "
+                   "'No confiables'). Si querés correrlos de nuevo, apretá 'Volver a valuar estos tickers' acá abajo.")
+    redo_set = [t for t in tickers if t in done]
+    if redo_set and not pending and st.button("Volver a valuar estos tickers", help="Borra la fila de cada uno de los tickers de la lista "
+                                                                                    "y los deja pendientes para la próxima tanda."):
+        st.session_state["lote_rows"] = [r for r in rows if str(r["Ticker"]) not in set(redo_set)]
+        for t in redo_set:
+            raws.pop(t, None)
+        st.rerun()
 
     if rows:
         df = pd.DataFrame(rows)
@@ -343,9 +355,9 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
                            file_name=f"Lote_DCF_{datetime.now():%Y%m%d_%H%M}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         if any(r.get("Estado") in RESCUE_STATES for r in rows) and st.button("Reintentar las 'No confiables'"):
-            with st.spinner("Esperando y reintentando…"):
-                n = rescue(rows, raws, load_fn, waits=(15.0, 30.0))
-            st.success(f"Recuperadas: {n}.")
+            msg = st.empty()
+            n = rescue(rows, raws, load_fn, waits=(15.0, 30.0), on_progress=lambda m: msg.info(m))
+            msg.success(f"Terminé. Recuperadas: {n}. Actualizando la tabla…")
             st.rerun()
         if st.button("Borrar resultados y empezar de cero"):
             st.session_state["lote_rows"], st.session_state["lote_raw"] = [], {}
