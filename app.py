@@ -86,6 +86,9 @@ STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 APP_VERSION = "v2.47 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
+if not hasattr(data_yahoo, "statement_currency_check"):
+    st.warning("**data_yahoo.py es una versión vieja:** el control de la moneda de los estados contables (v2.47) NO está activo. "
+               "Subí data_yahoo.py de la v2.47 junto con los demás archivos y reiniciá la app.")
 
 MODEL_LABELS = {"FCFF": "Empresa común (todos los demás sectores)",
                 "ER": "Banco / aseguradora / financiera / utility regulada",
@@ -103,7 +106,16 @@ class _Degraded(Exception):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _cached_load_ok(sym: str, allow_annual: bool, adr_ratio: float, fin_mode: str = "auto"):
-    co_, warns_ = data_yahoo.load_company(sym, allow_annual, adr_ratio or None, fin_mode)
+    if fin_mode == "auto":
+        co_, warns_ = data_yahoo.load_company(sym, allow_annual, adr_ratio or None)          # compatible con un data_yahoo.py viejo
+    else:
+        try:
+            co_, warns_ = data_yahoo.load_company(sym, allow_annual, adr_ratio or None, fin_mode)
+        except TypeError as _e:
+            if "positional argument" in str(_e):
+                raise RuntimeError("data_yahoo.py es una versión vieja (no conoce la opción de moneda): subí data_yahoo.py de la v2.47 "
+                                   "a la misma carpeta que app.py y reiniciá la app.") from _e
+            raise
     if data_yahoo.is_degraded(co_):
         raise _Degraded((co_, warns_))
     return co_, warns_
