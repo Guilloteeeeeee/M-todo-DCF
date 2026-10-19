@@ -126,6 +126,7 @@ class Params:
     rf: Optional[float] = None
     beta: Optional[float] = None
     wacc_override: Optional[float] = None
+    captive_adj: bool = True                # v2.41: restar solo la deuda propia cuando hay financiera propia (Ford, GM, CAT...)
     capitalize_rd: bool = True              # capitalizar el gasto en I+D (Damodaran, cap. 11) con los años que entrega Yahoo
     survival_adj: bool = True               # ajuste por probabilidad de quiebra (Damodaran, cap. 8) para calificación sintética peor que BBB
     ke_override: Optional[float] = None
@@ -222,7 +223,7 @@ _NAME_FIN = ("bank", "bancorp", "banco", "banque", "banca", "bancshares", "insur
 
 
 def route_model(co: CompanyData) -> Tuple[str, str]:
-    """Devuelve (modelo, motivo). modelo in {'FCFF','ER','REIT'}."""
+    """Devuelve (modelo, motivo). modelo in {'FCFF','ER','REIT'}. v2.40: las utilities reguladas van por ER."""
     ind = (co.industry or "").strip().lower()
     sec = (co.sector or "").strip().lower()
     if not ind:
@@ -263,6 +264,11 @@ def route_model(co: CompanyData) -> Tuple[str, str]:
             return "ER", "Prestamista de tarjetas/créditos: el crédito es su negocio, se usa retorno excedente."
         return "FCFF", ("Servicios de crédito: se trata como red de pagos o servicio (V, MA, PYPL), sin cartera de "
                         "préstamos propia. Si es un prestamista, elegí 'Banco / aseguradora / financiera'.")
+    if ind.startswith("utilities - regulated"):
+        return "ER", ("Utility regulada (electricidad, gas o agua): el regulador fija lo que puede ganar sobre el capital invertido y "
+                      "gran parte de lo que invierte es deuda, así que el valor se calcula sobre el patrimonio y el ROE (retorno "
+                      "excedente), como en un financiero. Las productoras independientes, renovables y diversificadas siguen por FCFF. "
+                      "Confirmalo en el selector si no corresponde.")
     return "FCFF", "Empresa no financiera: FCFF desde ingresos."
 
 
@@ -840,10 +846,49 @@ def apply_rd(co: CompanyData, p: Params) -> Tuple[CompanyData, Optional[dict]]:
     return co2, dict(rd=co.rd_ttm, amort=amort, net=net, asset=asset, shift=shift)
 
 
+
+CAPTIVE_NC_MIN = 0.25     # cuentas por cobrar de largo plazo / deuda: señal de que la empresa presta plata a sus clientes
+CAPTIVE_INT_MAX = 0.50    # deuda que explica el interés pagado / deuda total: si es menos de la mitad, el resto paga interés dentro del EBIT
+
+
+def apply_captive_finance(co: CompanyData, p: Params):
+    """Financiera propia (Ford Credit, GM Financial, Cat Financial...). Los intereses de su deuda ya están descontados dentro del
+    resultado operativo (EBIT); si además se resta toda su deuda en el puente al patrimonio, se la castiga dos veces.
+    Se detecta con DOS señales a la vez: (1) cuentas por cobrar de largo plazo >= 25 % de la deuda (la empresa financia a sus
+    clientes) y (2) el interés pagado, a una tasa normal, explica menos de la mitad de la deuda (el resto no paga interés "abajo
+    del EBIT"). Con las dos juntas no hay falsos positivos en 86 empresas probadas; con una sola sí. La deuda propia se estima
+    como interés pagado / costo de la deuda y el resto se excluye (de la deuda y del capital invertido).
+    Verificado a mano: Ford (estimó 23.400 M, real 21.900 M), GM (excluyó 115.600 M, real 114.000 M), CAT (8.500 M vs 8.650 M).
+    Devuelve (empresa ajustada, info) o (empresa, None). La caja no se toca (falta el dato de cuánta es de la financiera)."""
+    if not getattr(p, "captive_adj", True):
+        return co, None
+    if co.receivables_nc is None or co.interest_expense_ttm is None or co.interest_expense_ttm <= 0:
+        return co, None
+    debt = co.debt if _leases_included(co, p) else max(0.0, co.debt - co.lease_debt)
+    if debt <= 0:
+        return co, None
+    rf = p.rf if p.rf is not None else co.rf
+    kd = rf + _BBB_SPREAD + p.crp / 1.5
+    implied = co.interest_expense_ttm / kd
+    nc_share = co.receivables_nc / debt
+    if nc_share < CAPTIVE_NC_MIN or implied > CAPTIVE_INT_MAX * debt:
+        return co, None
+    excl = debt - implied
+    new = replace(co, debt=co.debt - excl, invested_capital=None if co.invested_capital is None else co.invested_capital - excl)
+    return new, dict(excl=excl, implied=implied, debt=debt, nc_share=nc_share, int_share=implied / debt)
+
+
 def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
     warns: List[str] = []
     N = int(clamp(p.horizon, 5, 20))
     co, rd_info = apply_rd(co, p)
+    co, cf_info = apply_captive_finance(co, p)
+    if cf_info:
+        warns.append(f"Financiera propia detectada: las cuentas por cobrar de largo plazo son {cf_info['nc_share']:.0%} de la deuda y el interés pagado "
+                     f"explica solo {cf_info['int_share']:.0%} de ella. Los intereses de la financiera ya están dentro del resultado operativo, así que "
+                     f"no se restan: de {cf_info['debt']:,.0f} M de deuda se excluyen {cf_info['excl']:,.0f} M (queda la deuda propia estimada, "
+                     f"{cf_info['implied']:,.0f} M) y el capital invertido baja lo mismo. La caja no se ajusta (falta el dato de cuánta es de la financiera): "
+                     "puede estar sobrando. Es una estimación; verificada a mano con Ford, GM y CAT.")
     if rd_info:
         warns.append(f"I+D capitalizado (Damodaran, cap. 11; vida {RD_LIFE} años porque Yahoo no entrega más historia): EBIT + {rd_info['rd']:,.0f} "
                      f"de I+D − {rd_info['amort']:,.0f} de amortización = {rd_info['net']:+,.0f} M; se suman {rd_info['asset']:,.0f} M de activo "
@@ -1040,6 +1085,7 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
                     beta=c["beta"], rf=c["rf"], beta_T=terminal_beta(co, p),
                     g1=g1, g2=g2, g_src=g_src, margin0=m0, margin_start=m_start, ttm_normalized=ttm_norm, margin_target=mT, roic0=roic0, roicT=roicT,
                     moat_label=moat_label, moat_reasons=moat_reasons, moat_src=moat_src, moat_partial=moat_partial,
+                    captive_excl=(cf_info or {}).get('excl', 0.0),
                     exit_ev_ebit=exit_mult, tv_nopat=tv / nopat_N if nopat_N else float('nan'), roic_note=roic_note,
                     nopat0=nopat0, tv=tv, pv_explicit=pv_sum, pv_tv=pv_tv,
                     cash=co.cash, nonop=nonop, ic_op=ic, debt=debt_sub, minority=co.minority, spread=spread,

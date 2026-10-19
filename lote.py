@@ -41,7 +41,7 @@ SUGGESTED = (
 
 FLAG_HELP = {
     "datos incompletos": "Yahoo no entregó sector, industria, país, nombre o la capitalización de mercado.",
-    "no confiable": "Faltan datos clave (o llegaron degradados): el Excel NO muestra valores, solo una referencia. Se reintenta solo; si persiste, probá esa empresa más tarde.",
+    "no confiable": "Faltan datos clave (o llegaron degradados): el Excel NO muestra valores, solo una referencia. Reintentala con el botón 'Reintentar las No confiables'; si persiste, probá esa empresa más tarde.",
     "no aplica por DCF": "El valor base es menos de 2 % del precio: con estos supuestos el negocio no genera valor para el accionista (pérdidas, ROIC bajo el costo de capital). El DCF no es la herramienta adecuada.",
     "sin analistas": "No hay estimaciones de analistas de ingresos: el crecimiento sale de la historia.",
     "pérdida operativa": "EBIT del TTM ≤ 0.",
@@ -319,14 +319,15 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
                 table_slot.dataframe(pd.DataFrame(rows)[[c for c in COLUMNS if c in pd.DataFrame(rows).columns][:16]], **stretch)
             if pausa and i < len(batch):
                 time.sleep(float(pausa))
+        # v2.39: ya no se reintenta solo (con Yahoo limitando eran muchos minutos sin poder descargar nada):
+        # primero aparece el Excel con lo hecho, y las "No confiables" se reintentan con el botón de más abajo.
         n_bad = sum(1 for r in rows if r.get("Estado") in RESCUE_STATES)
-        if n_bad:
-            bar.progress(1.0, text=f"Reintentando {n_bad} empresa(s) con datos incompletos…")
-            rescue(rows, raws, load_fn, waits=(10.0, 25.0), on_progress=lambda s_: bar.progress(1.0, text=f"Reintentando {s_}…"))
         bar.progress(1.0, text="Tanda terminada")
         pending = [t for t in tickers if t not in {str(r["Ticker"]) for r in rows}]
         st.success(f"Tanda terminada. Pendientes: {len(pending)}."
-                   + (" Apretá de nuevo para seguir." if pending else " ¡Lista completa! Descargá el Excel."))
+                   + (" Apretá de nuevo para seguir." if pending else " ¡Lista completa! Descargá el Excel.")
+                   + (f" {n_bad} empresa(s) llegaron con datos incompletos: podés descargar el Excel igual, o apretar "
+                      "'Reintentar las No confiables' más abajo." if n_bad else ""))
     elif go and not pending:
         st.info("No hay tickers pendientes.")
 

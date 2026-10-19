@@ -742,6 +742,47 @@ def test_premio_parcial_de_foso_y_capital_con_no_operativos():
     assert r2.extras["roic0"] == Params().roic_cap
 
 
+def test_utilities_reguladas_por_retorno_excedente():
+    """v2.40: las utilities reguladas se valúan por patrimonio y ROE; productoras, renovables y diversificadas siguen por FCFF."""
+    for ind in ("Utilities - Regulated Electric", "Utilities - Regulated Gas", "Utilities - Regulated Water"):
+        m, why = route_model(industrial(industry=ind))
+        assert m == "ER" and "utility regulada" in why.lower(), (ind, m)
+    for ind in ("Utilities - Independent Power Producers", "Utilities - Renewable", "Utilities - Diversified", "Software - Application"):
+        assert route_model(industrial(industry=ind))[0] == "FCFF", ind
+    ut = industrial(industry="Utilities - Regulated Electric", equity=40_000.0, ni_ttm=4_000.0, ni_hist=[3_600.0, 3_800.0, 3_900.0, 4_000.0],
+                    equity_hist=[34_000.0, 36_000.0, 38_000.0, 40_000.0], shares_m=1_000.0, price=60.0, market_cap_m=60_000.0,
+                    dividends_ttm=2_600.0, buybacks_ttm=0.0)
+    r = run_scenarios(ut, Params(), "ER")
+    assert all(r[k].ok for k in ("Pesimista", "Base", "Optimista")), [r[k].error for k in r]
+    assert 0.3 * ut.price < r["Base"].per_share < 2.0 * ut.price and r["Pesimista"].per_share <= r["Base"].per_share <= r["Optimista"].per_share
+
+
+def test_financiera_propia_resta_solo_la_deuda_propia():
+    from dcf_models import apply_captive_finance
+    """v2.41: con financiera propia (dos señales a la vez) se excluye la deuda de la financiera; sin las dos, no se toca nada."""
+    ford = industrial(debt=163_000.0, lease_debt=2_300.0, interest_expense_ttm=1_450.0, receivables_nc=59_000.0,
+                      equity=36_000.0, cash=31_000.0, ebit_ttm=7_000.0, revenue_ttm=188_000.0, market_cap_m=50_000.0, rf=0.051,
+                      invested_capital=196_000.0)
+    adj, info = apply_captive_finance(ford, Params())
+    assert info and abs(info["implied"] - 1_450.0 / (0.051 + 0.011)) < 600, info                # deuda propia ≈ 23.400 M
+    assert abs(adj.debt - (163_000.0 - info["excl"])) < 1e-6 and abs(adj.invested_capital - (196_000.0 - info["excl"])) < 1e-6
+    assert apply_captive_finance(ford, Params(captive_adj=False))[1] is None
+    # una sola señal no alcanza: largo plazo grande pero el interés es normal para su deuda (tipo COP/GE)
+    solo_nc = replace(ford, interest_expense_ttm=9_000.0)
+    assert apply_captive_finance(solo_nc, Params())[1] is None
+    # interés bajo pero sin cuentas por cobrar de largo plazo (tipo NVDA/NVO con deuda barata)
+    assert apply_captive_finance(replace(ford, receivables_nc=None), Params())[1] is None
+    assert apply_captive_finance(replace(ford, receivables_nc=1_000.0), Params())[1] is None
+    # sin interés informado: no se puede estimar
+    assert apply_captive_finance(replace(ford, interest_expense_ttm=None), Params())[1] is None
+    # el ajuste cambia el valor (la dirección depende de cada caso: baja la deuda restada y sube el WACC) y queda anotado
+    p = Params(rf=0.051)
+    v_on = value_company(ford, p, "FCFF", "Base")
+    v_off = value_company(ford, Params(rf=0.051, captive_adj=False), "FCFF", "Base")
+    assert v_on.per_share != v_off.per_share and v_on.extras["captive_excl"] > 0 and v_off.extras["captive_excl"] == 0
+    assert any("Financiera propia" in w for w in v_on.warnings)
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):

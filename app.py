@@ -1,7 +1,7 @@
 """
 DCF v2 — Valuación por escenarios (Pesimista / Base / Optimista) para cualquier acción listada en Yahoo Finance.
 
-Modelos:  FCFF desde ingresos (no financieras) · Retorno excedente (bancos, seguros, mREITs) · AFFO (REITs).
+Modelos:  FCFF desde ingresos (no financieras) · Retorno excedente (bancos, seguros, mREITs, utilities reguladas) · AFFO (REITs).
 Ejecutar:  streamlit run app.py
 """
 
@@ -83,12 +83,12 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.38 · 19/10/2026"
+APP_VERSION = "v2.41 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
 MODEL_LABELS = {"FCFF": "Empresa común (todos los demás sectores)",
-                "ER": "Banco / aseguradora / financiera",
+                "ER": "Banco / aseguradora / financiera / utility regulada",
                 "REIT": "REIT (inmobiliaria que cobra alquileres)"}
 SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
 
@@ -766,6 +766,7 @@ with t4:
         lines += [
             ("Peso del valor terminal en el EV", pct(base.tv_share, 0), "Alerta si > 75 %"),
             ("EV/EBIT de salida implícito", f"{ex['exit_ev_ebit']:.1f}x", "Razonable: ~8–20x según sector"),
+            *([("Deuda de financiera propia excluida", f"{ex['captive_excl']:,.0f} M", "No se resta: sus intereses ya están en el EBIT (v2.41)")] if ex.get('captive_excl') else []),
             ("ROIC terminal vs WACC terminal", f"{pct(ex['roicT'], 1)} vs {pct(ex['wacc_T'], 1)}", f"Foso: {ex['moat_label']} ({ex['moat_src']})" + (f" · premio parcial interno {ex['moat_partial']:.0%}" if ex.get('moat_partial') else "")),
             ("Beta usada / Rf", f"{ex['beta']:.2f} / {pct(ex['rf'], 2)}", "Con datos de industria: promedio entre la beta del sector (re-apalancada) y la propia, piso 0,5 y tope 2,0. Sin industria: Blume 0,67·β + 0,33"),
             ("Beta terminal", f"{ex['beta_T']:.2f}" if ex.get('beta_T') is not None else "n/d", "Promedio entre la beta de los primeros años (con la deuda de la industria) y 1,0: 25 % propia, 25 % industria, 50 % mercado"),
@@ -851,7 +852,7 @@ with t5:
   El capital invertido es operativo (deuda + patrimonio − caja − inversiones en otras empresas). Valor terminal de Gordon sobre
   NOPAT × (1 − g/ROIC) con el WACC del sector; el gasto en **I+D se capitaliza** (se suma al resultado operativo y se amortiza en 4 años, con el I+D no amortizado como activo); si la calificación sintética es peor que BBB el valor se multiplica por (1 − probabilidad de quiebra a 10 años) (tabla del libro de Damodaran); la distancia WACC − g se mantiene en al menos 2,5 pp.
   EV + caja + inversiones en otras empresas − deuda − minoritarios = patrimonio, dividido por las acciones implícitas.
-* **Retorno excedente** (bancos, aseguradoras, mREITs, brokers). Valor = book value + VP de (ROE − Ke) × patrimonio. El ROE
+* **Retorno excedente** (bancos, aseguradoras, mREITs, brokers y, desde la v2.40, utilities reguladas de electricidad, gas y agua: el regulador fija lo que ganan sobre su capital y la mayor parte de lo que invierten se financia con deuda, así que el método por EV y flujo libre castigaba de más a todo el grupo; las productoras independientes, renovables y diversificadas siguen por FCFF). Valor = book value + VP de (ROE − Ke) × patrimonio. El ROE
   parte de un valor normalizado y cae hacia Ke + persistencia × (ROE normalizado − Ke); el payout converge al compatible con *g*.
   Si ROE = Ke, el valor es exactamente el book value.
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
