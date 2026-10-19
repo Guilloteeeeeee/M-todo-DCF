@@ -17,7 +17,7 @@ try:
     from country_risk import country_crp
     from country_tax import marginal_tax_for
     from industry_data import (IND, ERP_DAMODARAN, ERP_DATE, ERP_MAX_MESES, erp_is_stale, DATE as IND_DATE, DATE_ISO as IND_DATE_ISO,
-                               attach as attach_industry, get_ref, industry_names)
+                               attach as attach_industry, get_ref, industry_names, reference_status)
     from dcf_models import (MOAT_SPREADS, BETA_MIN, BETA_MAX, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model,
                             run_scenarios, sensitivity, terminal_growth_default)
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
@@ -83,7 +83,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.43 · 19/10/2026"
+APP_VERSION = "v2.44 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -343,6 +343,15 @@ with st.sidebar:
         lease_opt = st.selectbox("Arrendamientos como deuda", ["auto", "sí", "no"], key=K("lease"),
                                  help="Auto: EE.UU. = no (el gasto de alquiler ya está en el EBIT); resto = sí.")
 
+try:
+    _rs = reference_status()
+    _venc = [r for r in _rs if r["vencida"]]
+    with st.sidebar.expander(("⚠️ Datos de referencia: hay que renovar " + str(len(_venc))) if _venc else "✅ Datos de referencia al día"):
+        for r in _rs:
+            st.markdown(f"{'⚠️' if r['vencida'] else '✅'} **{r['nombre']}** · {r['fecha']} · {r['meses']:.0f} meses "
+                        f"(se renueva cada {r['limite_meses']})" + (f"  \n_{r['donde']}_" if r["vencida"] else ""))
+except Exception:  # noqa: BLE001
+    pass
 st.sidebar.caption(f"Versión de la app: {APP_VERSION}")
 st.title("📈 DCF v2 — Valuación por escenarios")
 st.caption("Ingresá un ticker de Yahoo Finance (ej.: AAPL, KO, JPM, O, TSM, SAP.DE, 7203.T, NESN.SW, ITUB). "
@@ -483,6 +492,13 @@ try:
     if erp_is_stale():
         all_warns.append(f"La prima de riesgo de mercado cargada ({ERP_DAMODARAN:.2%}) es de {ERP_DATE} y tiene más de {ERP_MAX_MESES} meses: "
                          "conviene actualizarla con la prima implícita vigente de Damodaran (ERPbymonth, columna ERP T12m).")
+except Exception:  # noqa: BLE001
+    pass
+try:
+    _dam = [r for r in reference_status() if r["vencida"] and r["nombre"].startswith("Planilla")]
+    if _dam:
+        all_warns.append(f"La planilla de empresas por industria de Damodaran es de {_dam[0]['fecha']} y tiene más de 12 meses: "
+                         "hay empresas nuevas o cambiadas de industria que no figuran. Conviene bajarla de nuevo.")
 except Exception:  # noqa: BLE001
     pass
 try:

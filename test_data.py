@@ -259,6 +259,18 @@ def test_industria_desde_la_planilla_de_damodaran():
     assert name3 == "Power" and "elegida" in how3
 
 
+def test_datos_de_referencia_avisan_cuando_vencen():
+    """v2.44: lista de datos a renovar (ERP, tablas de industria, planilla de empresas) con su edad y si pasaron el plazo."""
+    from datetime import date
+    import industry_data as idt
+    hoy = idt.reference_status(date(2026, 10, 20))
+    assert [r["vencida"] for r in hoy] == [False, False, False], hoy
+    tarde = {r["nombre"][:8]: r for r in idt.reference_status(date(2027, 5, 1))}
+    assert tarde["Prima de"]["vencida"] and tarde["Tablas p"]["vencida"] and not tarde["Planilla"]["vencida"]   # mayo 2027: ERP y tablas de enero vencidas, la planilla no
+    muy = idt.reference_status(date(2027, 12, 1))
+    assert all(r["vencida"] for r in muy) and "Companies in each industry" in muy[2]["donde"]
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

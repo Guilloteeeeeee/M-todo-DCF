@@ -18,6 +18,27 @@ def erp_is_stale(today=None) -> bool:
     return erp_age_days(today) > ERP_MAX_MESES * 30.4
 DATE = "enero 2026"
 DATE_ISO = "2026-01-01"   # fecha de las tablas de Damodaran (la app avisa si pasaron más de 12 meses)
+
+
+def reference_status(today=None):
+    """v2.44: lista de los datos de referencia que hay que renovar a mano, con su fecha, su edad y si ya pasó el plazo.
+    Devuelve [{'nombre','fecha','meses','limite_meses','vencida','donde'}]. Para agregar otra tabla, sumar una fila a _ITEMS."""
+    from datetime import date
+    from damodaran_map import DAM_FILE_DATE, DAM_FILE_ISO
+    hoy = today or date.today()
+    items = [
+        ("Prima de riesgo de mercado (ERP)", ERP_DATE, ERP_DATE_ISO, ERP_MAX_MESES,
+         "Damodaran → Data → ERPbymonth, columna «ERP (T12m)»; se cambia en industry_data.py (ERP_DAMODARAN, ERP_DATE, ERP_DATE_ISO)"),
+        ("Tablas por industria, riesgo país e impuestos", DATE, DATE_ISO, 12,
+         "Damodaran → Data → tablas de enero (betas, márgenes, ROC por industria; riesgo país; impuestos)"),
+        ("Planilla de empresas por industria", DAM_FILE_DATE, DAM_FILE_ISO, 12,
+         "Damodaran → «Companies in each industry» (indname.xls); se rehace damodaran_companies.tsv.gz"),
+    ]
+    out = []
+    for nombre, fecha, iso, limite, donde in items:
+        dias = (hoy - date.fromisoformat(iso)).days
+        out.append(dict(nombre=nombre, fecha=fecha, meses=dias / 30.4, limite_meses=limite, vencida=dias > limite * 30.4, donde=donde))
+    return out
 IND = {
 "Advertising": {
 "us": {

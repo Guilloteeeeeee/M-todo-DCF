@@ -246,6 +246,12 @@ def build_excel(rows: List[dict], raws: Dict[str, str]) -> bytes:
     states, flags = summarize(rows)
     resumen = [("Generado", datetime.now().strftime("%Y-%m-%d %H:%M")), ("Empresas", len(rows)), ("", "")]
     resumen += [(f"Estado: {k}", v) for k, v in states] + [("", "")]
+    try:
+        from industry_data import reference_status
+        resumen += [(f"Dato de referencia: {r['nombre']}", f"{r['fecha']} · {r['meses']:.0f} meses · " + ("⚠️ RENOVAR" if r["vencida"] else "al día"))
+                    for r in reference_status()] + [("", "")]
+    except Exception:  # noqa: BLE001
+        pass
     resumen += [(f"Bandera: {k}", f"{v} — {h}") for k, v, h in flags]
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         df.to_excel(xw, sheet_name="Lote", index=False)
