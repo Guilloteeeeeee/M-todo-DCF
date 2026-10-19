@@ -2778,6 +2778,9 @@ def get_ref(name, country=""):
     return None, ""
 
 
+NONLENDER_FIN_FROM = "Financial Svcs. (Non-bank & Insurance)"
+NONLENDER_FIN_TO = "Business & Consumer Services"   # donde Damodaran pone a Equifax, TransUnion y Verisk (datos y servicios de bajo capital)
+NONLENDER_MAX_DEBT_TO_CAP = 1.5                        # por encima de esto la empresa se parece a un prestamista: no se reasigna
 USE_DAMODARAN_LIST = True   # v2.43: buscar primero en la planilla de Damodaran (los tests y comparaciones la pueden apagar)
 
 
@@ -2798,6 +2801,15 @@ def attach(co, model, manual_name=None):
             name = map_industry(getattr(co, "industry", ""))
             if name:
                 how = f"detectada desde Yahoo ({co.industry}): no figura en la planilla de Damodaran"
+    # v2.45: redes de pago, procesadores, bolsas y proveedores de datos (Visa, Mastercard, PayPal, FIS, S&P Global, CME...) figuran en la
+    # planilla junto con los prestamistas. Ese grupo tiene deuda de 2,7 veces el patrimonio y beta desapalancada de 0,33 porque la deuda de
+    # un prestamista es su materia prima; aplicado a una empresa que se valúa por flujo libre y casi no tiene deuda da un WACC demasiado bajo.
+    # Si se valúa por FCFF y no tiene deuda de prestamista, se compara con servicios de negocio de bajo capital.
+    if (not (manual_name and manual_name in IND) and model == "FCFF" and name == NONLENDER_FIN_FROM
+            and (getattr(co, "market_cap_m", 0) or 0) > 0 and (getattr(co, "debt", 0) or 0) / co.market_cap_m <= NONLENDER_MAX_DEBT_TO_CAP
+            and get_ref(NONLENDER_FIN_TO, getattr(co, "country", ""))[0]):
+        name = NONLENDER_FIN_TO
+        how += f" · reasignada a {NONLENDER_FIN_TO}: no presta dinero y se valúa por flujo libre"
     ref, region = get_ref(name, getattr(co, "country", ""))
     if not ref:
         return co, None, ""

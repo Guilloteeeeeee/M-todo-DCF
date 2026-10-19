@@ -99,7 +99,7 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
             base = res["Base"]
         row.update({"Empresa": co.name, "Sector": co.sector, "Industria": co.industry, "País": co.country,
                     "Industria Damodaran": ind_name or "",
-                    "Origen industria": ("planilla de Damodaran" if (ind_how or "").startswith("según la planilla")
+                    "Origen industria": (("planilla de Damodaran, reasignada (no presta dinero)" if "reasignada" in (ind_how or "") else "planilla de Damodaran") if (ind_how or "").startswith("según la planilla")
                                          else ("Yahoo (no está en la planilla)" if ind_name else "")), "Modelo": model, "Precio": co.price, "Moneda": co.currency})
         if not base.ok:
             row.update({"Estado": "No valuable", "Detalle": base.error[:300], "Datos faltantes": ", ".join(missing),

@@ -271,6 +271,22 @@ def test_datos_de_referencia_avisan_cuando_vencen():
     assert all(r["vencida"] for r in muy) and "Companies in each industry" in muy[2]["donde"]
 
 
+def test_redes_de_pago_y_datos_no_se_comparan_con_prestamistas():
+    """v2.45: V/MA/bolsas (FCFF, sin deuda de prestamista) van a Business & Consumer Services; prestamistas (ER) y manual no cambian."""
+    import industry_data as idt
+    from dcf_models import CompanyData
+    mk = lambda tk, nm, ind, debt: CompanyData(ticker=tk, name=nm, industry=ind, country="United States", sector="Financial Services",
+                                               price=100, currency="USD", market_cap_m=500_000, debt=debt, cash=1, equity=1, ebit_ttm=1, revenue_ttm=10)
+    _, n, how = idt.attach(mk("V", "Visa Inc.", "Credit Services", 20_000), "FCFF", None)
+    assert n == "Business & Consumer Services" and "reasignada" in how, (n, how)
+    _, n, _ = idt.attach(mk("AXP", "American Express Company", "Credit Services", 60_000), "ER", None)
+    assert n == "Financial Svcs. (Non-bank & Insurance)", n                      # prestamista por ER: conserva el grupo
+    _, n, _ = idt.attach(mk("V", "Visa Inc.", "Credit Services", 900_000), "FCFF", None)
+    assert n == "Financial Svcs. (Non-bank & Insurance)", n                      # deuda de prestamista: no se reasigna
+    _, n, how = idt.attach(mk("V", "Visa Inc.", "Credit Services", 20_000), "FCFF", "Power")
+    assert n == "Power" and "elegida" in how                                      # lo que elegís vos manda
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

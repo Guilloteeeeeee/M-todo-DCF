@@ -83,7 +83,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.44 · 19/10/2026"
+APP_VERSION = "v2.45 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -874,7 +874,7 @@ with t5:
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
   ingreses. Lo retenido se reinvierte a Ke + spread, de ahí sale el crecimiento. Se descuenta a Ke.
 
-**Industria de comparación (v2.43).** La app busca cada empresa en la planilla de Damodaran «Companies in each industry» (48.156 empresas, las mismas 94 industrias de sus tablas) por ticker, por sufijo de bolsa o por nombre, y usa su industria exacta; si la empresa no figura, usa la industria de Yahoo traducida con reglas propias. La clasificación de Damodaran es por código industrial (SIC) y a veces no es la intuitiva (Alphabet y Meta en *Software (Entertainment)*; Caterpillar en *Construction Supplies*). Se puede cambiar a mano en el selector.
+**Industria de comparación (v2.43).** La app busca cada empresa en la planilla de Damodaran «Companies in each industry» (48.156 empresas, las mismas 94 industrias de sus tablas) por ticker, por sufijo de bolsa o por nombre, y usa su industria exacta; si la empresa no figura, usa la industria de Yahoo traducida con reglas propias. La clasificación de Damodaran es por código industrial (SIC) y a veces no es la intuitiva (Alphabet y Meta en *Software (Entertainment)*; Caterpillar en *Construction Supplies*). Excepción (v2.45): Visa, Mastercard, PayPal, procesadores de pagos, bolsas y proveedores de datos figuran en la planilla junto con los prestamistas; si se valúan por flujo libre y casi no tienen deuda (deuda ≤ 1,5 veces su capitalización), se comparan con *Business & Consumer Services* (donde Damodaran pone a Equifax, TransUnion y Verisk). Los prestamistas (AmEx, Capital One...) se valúan por retorno excedente y conservan su grupo. Se puede cambiar a mano en el selector.
 
 **Costo de capital.** Ke = Rf (bono 10 años EE.UU., spot) + β × prima de mercado (+ prima país). La prima de mercado es la implícita de EE.UU. de Damodaran (3,70 % a oct-2026; se actualiza a mano cada 4-6 meses y la app avisa si tiene más de 6 meses). β = promedio simple entre la beta de la industria (Damodaran; muestra de EE.UU., o la global si la de EE.UU. tiene menos de 20 empresas) re-apalancada con
 la deuda de la empresa (el promedio de muchas empresas tiene mucho menos error que la regresión de una sola) y la beta propia de la acción, con piso 0,5 y tope 2,0
