@@ -18,7 +18,7 @@ BANK = CompanyData(ticker="BNK", name="Banco Test", sector="Financial Services",
 REIT = CompanyData(ticker="REI", name="REIT Test", sector="Real Estate", industry="REIT - Industrial", country="United States",
                    price=60.0, shares_m=100.0, market_cap_m=6000.0, beta=0.9, rf=0.04, ni_ttm=200.0, da_ttm=250.0,
                    gains_adj_ttm=-20.0, revenue_hist=[900, 950, 1000, 1050], rev_g_y0=0.03, rev_g_y1=0.03)
-def load_company(sym, allow_annual=False, adr_ratio=None):
+def load_company(sym, allow_annual=False, adr_ratio=None, fin_cur_mode="auto"):
     if sym == "BAD":
         raise DataError("Yahoo no devolvió datos para 'BAD'")
     if sym == "BNK": return BANK, ["Aviso de prueba"]

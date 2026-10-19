@@ -206,11 +206,47 @@ def analyst_ranges(earnings_trend_mod: dict) -> dict:
 # ----------------------------------------------------------------------------
 # Construcción pura
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Control de la moneda de los estados contables (v2.47)
+# ----------------------------------------------------------------------------
+FX_CHECK_TOL = 1.5          # tolerancia (×) al comparar nuestros múltiplos con los de Yahoo
+FX_CHECK_MIN_GAP = 0.20     # solo se controla si la conversión mueve los montos al menos 20 %
+
+
+def statement_currency_check(fin_cur: str, qcur: str, fxr: float, mc: Optional[float], rev: Optional[float],
+                             equity: Optional[float], summary: dict, keystats: dict) -> Optional[str]:
+    """Caso Vale/Petrobras: Yahoo rotula los estados contables como BRL pero los montos ya vienen en dólares (los ADR presentan en USD),
+    y la app los dividía otra vez por el tipo de cambio (todo quedaba ~5 veces chico y el valor por acción salía en 0,26×).
+    Control: precio/ventas y precio/valor libro no dependen de la moneda y Yahoo los informa. Si con nuestra conversión no coinciden
+    con los de Yahoo pero SIN convertir sí coinciden (todos los que se pueden comparar), los montos ya estaban en la moneda de cotización.
+    Devuelve el texto de la evidencia, o None si no hay motivo para dudar (o si no se puede comprobar)."""
+    if fxr is None or fxr <= 0 or fin_cur == qcur or not mc or mc <= 0:
+        return None
+    if abs(fxr - 1.0) < FX_CHECK_MIN_GAP:
+        return None
+    pairs = []
+    ps_y = sf(summary.get("priceToSalesTrailing12Months"))
+    if ps_y and ps_y > 0 and rev and rev > 0:
+        pairs.append(("precio/ventas", mc / (rev * fxr), ps_y))
+    pb_y = _first(sf(keystats.get("priceToBook")), sf(summary.get("priceToBook")))
+    if pb_y and pb_y > 0 and equity and equity > 0:
+        pairs.append(("precio/valor libro", mc / (equity * fxr), pb_y))
+    if not pairs:
+        return None
+    lim = math.log(FX_CHECK_TOL)
+    sin_conv = [abs(math.log(o / y * fxr)) <= lim for _, o, y in pairs]    # si los montos ya estaban en la moneda de cotización
+    con_conv = [abs(math.log(o / y)) <= lim for _, o, y in pairs]          # si la conversión era correcta
+    if all(sin_conv) and not any(con_conv):
+        return "; ".join(f"{n}: con conversión {o:.1f}×, Yahoo informa {y:.1f}×, sin convertir {o * fxr:.1f}×" for n, o, y in pairs)
+    return None
+
+
 def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profile: dict, fin: dict,
                   trend: dict, dfa, dfq, fx_fetcher: Callable[[str, str], Optional[float]],
                   rf: float = RF_FALLBACK, allow_annual: bool = False,
                   fallback_price: Optional[float] = None, fallback_currency: Optional[str] = None,
-                  adr_ratio: Optional[float] = None, fallback_beta: Optional[float] = None
+                  adr_ratio: Optional[float] = None, fallback_beta: Optional[float] = None,
+                  fin_cur_mode: str = "auto"
                   ) -> Tuple[CompanyData, List[str]]:
     warns: List[str] = []
     qt = str(price_m.get("quoteType") or "EQUITY").upper()
@@ -326,6 +362,18 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         warns.append("Sin dato de caja: se asumió 0.")
     if debt is None:
         warns.append("Sin dato de deuda: se asumió 0.")
+
+    # --- moneda de los estados contables: control contra los múltiplos de Yahoo (o decisión manual del usuario)
+    if fin_cur != qcur and fin_cur_mode == "no_convertir":
+        fxr, fin_cur = 1.0, qcur
+        warns.append(f"Moneda de los estados contables: elegiste «ya están en {qcur}». No se convirtieron (Yahoo los rotula como otra moneda).")
+    elif fin_cur != qcur and fin_cur_mode == "auto":
+        _ev = statement_currency_check(fin_cur, qcur, fxr, None if cap_estimated else mc, rev, equity, summary, keystats)
+        if _ev:
+            warns.append(f"⚠️ Moneda de los estados contables corregida: Yahoo los rotula como {fin_cur}, pero los montos ya están en {qcur} "
+                         f"({_ev}). No se convirtieron. Si esto no coincide con lo que reporta la empresa, elegí «Convertir siempre» "
+                         "en Ajustes avanzados.")
+            fxr, fin_cur = 1.0, qcur
 
     # --- historia anual
     rev_h = F.annual_hist("TotalRevenue")
@@ -600,8 +648,8 @@ def get_risk_free() -> Tuple[float, bool]:
     return RF_FALLBACK, False
 
 
-def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float] = None
-                 ) -> Tuple[CompanyData, List[str]]:
+def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float] = None,
+                 fin_cur_mode: str = "auto") -> Tuple[CompanyData, List[str]]:
     from yahooquery import Ticker
     sym = sym.strip().upper()
     if not sym:
@@ -688,7 +736,8 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
     rf, ok = get_risk_free()
     co, warns = build_company(sym, price_m, summary, keystats, profile, fin, trend, dfa, dfq, get_fx,
                               rf=rf, allow_annual=allow_annual, fallback_price=fb_price,
-                              fallback_currency=fb_cur, adr_ratio=adr_ratio, fallback_beta=fb_beta)
+                              fallback_currency=fb_cur, adr_ratio=adr_ratio, fallback_beta=fb_beta,
+                              fin_cur_mode=fin_cur_mode)
     if not ok:
         warns.append(f"No pude leer la tasa del Tesoro a 10 años: se usó Rf = {RF_FALLBACK:.2%}.")
     if alt:

@@ -44,6 +44,7 @@ FLAG_HELP = {
     "no confiable": "Faltan datos clave (o llegaron degradados): el Excel NO muestra valores, solo una referencia. Reintentala con el botón 'Reintentar las No confiables'; si persiste, probá esa empresa más tarde.",
     "no aplica por DCF": "El valor base es menos de 2 % del precio: con estos supuestos el negocio no genera valor para el accionista (pérdidas, ROIC bajo el costo de capital). El DCF no es la herramienta adecuada.",
     "sin analistas": "No hay estimaciones de analistas de ingresos: el crecimiento sale de la historia.",
+    "moneda corregida": "Yahoo rotulaba los estados contables en otra moneda, pero sus múltiplos (precio/ventas, precio/valor libro) mostraban que los montos ya estaban en la moneda de cotización: no se convirtieron. Revisalo en la hoja de detalle.",
     "pérdida operativa": "EBIT del TTM ≤ 0.",
     "TTM bajo vs mediana, ingresos estables": "El margen del TTM está 8 pp o más por debajo del objetivo y los ingresos no caen: parece un cargo extraordinario. La proyección arranca del margen normal, no del TTM.",
     "TTM bajo vs mediana, ingresos caen": "El margen del TTM está 8 pp o más por debajo del objetivo y los ingresos caen: ¿deterioro real?",
@@ -137,6 +138,8 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
             flags.append("g recortado")
         if any("ROIC inicial normalizado" in w for w in base.warnings):
             flags.append("ROIC normalizado")
+        if any("Moneda de los estados contables corregida" in w for w in load_warns):
+            flags.append("moneda corregida")
         wacc = _f(base.discount_rate)
         if wacc is not None and (wacc < 0.06 or wacc > 0.12):
             flags.append("WACC extremo")

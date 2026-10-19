@@ -23,7 +23,7 @@ try:
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
-    _marcas = {"dcf_models.py": "moat_partial_premium", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "EXTRA_BAL_FIELDS", "lote.py": "implied_wacc"}
+    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "statement_currency_check", "lote.py": "implied_wacc"}
 
     def _tiene(archivo, marca):
         try:
@@ -83,7 +83,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.46 · 19/10/2026"
+APP_VERSION = "v2.47 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
@@ -102,16 +102,16 @@ class _Degraded(Exception):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _cached_load_ok(sym: str, allow_annual: bool, adr_ratio: float):
-    co_, warns_ = data_yahoo.load_company(sym, allow_annual, adr_ratio or None)
+def _cached_load_ok(sym: str, allow_annual: bool, adr_ratio: float, fin_mode: str = "auto"):
+    co_, warns_ = data_yahoo.load_company(sym, allow_annual, adr_ratio or None, fin_mode)
     if data_yahoo.is_degraded(co_):
         raise _Degraded((co_, warns_))
     return co_, warns_
 
 
-def cached_load(sym: str, allow_annual: bool, adr_ratio: float):
+def cached_load(sym: str, allow_annual: bool, adr_ratio: float, fin_mode: str = "auto"):
     try:
-        return _cached_load_ok(sym, allow_annual, adr_ratio)
+        return _cached_load_ok(sym, allow_annual, adr_ratio, fin_mode)
     except _Degraded as e:
         return e.payload
 
@@ -299,6 +299,13 @@ with st.sidebar:
                                 help="SOLO para ADRs de empresas extranjeras. Dejalo en 0 para empresas de EE.UU. "
                                      "(KO, JPM, V, O…). Ej.: TSM = 5, ITUB = 1, BABA = 8. Se ignora si la empresa "
                                      "reporta en dólares.")
+    _fin_opts = {"Automática (con control contra Yahoo)": "auto",
+                 "Ya están en la moneda de cotización (no convertir)": "no_convertir",
+                 "Convertir siempre (confiar en la etiqueta de Yahoo)": "convertir"}
+    fin_mode = _fin_opts[st.selectbox("Moneda de los estados contables", list(_fin_opts), key=K("fincur"),
+                                      help="Para empresas que reportan en otra moneda que la de cotización (ADRs). Yahoo a veces rotula mal la moneda "
+                                           "(ej.: Vale y Petrobras dicen BRL pero los montos ya están en dólares) y los valores quedaban 5 veces chicos. "
+                                           "«Automática» compara precio/ventas y precio/valor libro con los de Yahoo y corrige sola; avisa cuando lo hace.")]
     with st.expander("Ajustes avanzados"):
         margin_mode = st.selectbox("Margen operativo objetivo", ["median", "ttm", "analysts", "manual"], key=K("mmode"),
                                    format_func={"median": "Mediana histórica (3-4 años + TTM)",
@@ -388,7 +395,7 @@ if not sym:
 # ----------------------------------------------------------------------------
 try:
     with st.spinner(f"Descargando datos de {sym}…"):
-        co, load_warns = cached_load(sym, allow_annual, adr_ratio)
+        co, load_warns = cached_load(sym, allow_annual, adr_ratio, fin_mode)
 except Exception as e:  # noqa: BLE001
     st.error(f"No pude cargar **{sym}**: {e}")
     st.stop()

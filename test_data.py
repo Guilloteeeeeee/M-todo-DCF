@@ -287,6 +287,56 @@ def test_redes_de_pago_y_datos_no_se_comparan_con_prestamistas():
     assert n == "Power" and "elegida" in how                                      # lo que elegís vos manda
 
 
+def test_estados_ya_en_dolares_rotulados_como_reales():
+    """Caso Vale/Petrobras: Yahoo dice BRL pero los montos ya están en USD. El control con los múltiplos de Yahoo lo detecta."""
+    dfa, dfq = frames(sym="VAL", cur="BRL")
+    fxb = lambda a, b: 0.2 if (a, b) == ("BRL", "USD") else None
+    # cap 8.000 M; ventas TTM 1.040 M -> precio/ventas real 7,7×; valor libro 620 M -> 12,9×
+    summ = {"beta": 1.0, "priceToSalesTrailing12Months": 8000 / 1040}
+    ks = {"sharesOutstanding": 200e6, "priceToBook": 8000 / 620}
+    co, w = build_company("VAL", price, summ, ks, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co.revenue_ttm - 1040.0) < 1e-9 and abs(co.fx - 1.0) < 1e-12 and co.fin_currency == "USD"      # sin convertir
+    assert abs(co.debt - 300.0) < 1e-9 and abs(co.cash - 120.0) < 1e-9
+    assert any("Moneda de los estados contables corregida" in x for x in w)
+
+
+def test_conversion_correcta_no_se_toca():
+    """Si los estados SÍ están en la moneda rotulada, los múltiplos de Yahoo coinciden con los convertidos: no se corrige."""
+    dfa, dfq = frames(sym="VAL", cur="BRL")
+    fxb = lambda a, b: 0.2 if (a, b) == ("BRL", "USD") else None
+    summ = {"beta": 1.0, "priceToSalesTrailing12Months": 8000 / (1040 * 0.2)}
+    ks = {"sharesOutstanding": 200e6, "priceToBook": 8000 / (620 * 0.2)}
+    co, w = build_company("VAL", price, summ, ks, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co.revenue_ttm - 1040 * 0.2) < 1e-9 and abs(co.fx - 0.2) < 1e-12 and co.fin_currency == "BRL"
+    assert not any("corregida" in x for x in w)
+    # sin múltiplos de Yahoo no hay con qué comprobar: se confía en la etiqueta
+    co2, w2 = build_company("VAL", price, {"beta": 1.0}, {"sharesOutstanding": 200e6}, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co2.fx - 0.2) < 1e-12 and not any("corregida" in x for x in w2)
+    # una sola señal que no coincide con ninguna de las dos hipótesis: tampoco se toca
+    co3, w3 = build_company("VAL", price, {"beta": 1.0, "priceToSalesTrailing12Months": 1.0}, {"sharesOutstanding": 200e6}, prof,
+                            {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co3.fx - 0.2) < 1e-12
+
+
+def test_moneda_manual_y_euro_no_se_corrigen_solos():
+    dfa, dfq = frames(sym="VAL", cur="BRL")
+    fxb = lambda a, b: 0.2 if (a, b) == ("BRL", "USD") else None
+    summ = {"beta": 1.0, "priceToSalesTrailing12Months": 8000 / 1040}
+    ks = {"sharesOutstanding": 200e6, "priceToBook": 8000 / 620}
+    # «Convertir siempre»: se respeta la etiqueta aunque los múltiplos digan otra cosa
+    co, _ = build_company("VAL", price, summ, ks, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb, fin_cur_mode="convertir")
+    assert abs(co.fx - 0.2) < 1e-12
+    # «No convertir»: aunque no haya múltiplos de Yahoo
+    co2, w2 = build_company("VAL", price, {"beta": 1.0}, {"sharesOutstanding": 200e6}, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb,
+                            fin_cur_mode="no_convertir")
+    assert abs(co2.fx - 1.0) < 1e-12 and abs(co2.revenue_ttm - 1040.0) < 1e-9 and any("elegiste" in x for x in w2)
+    # EUR->USD (1,10): la conversión mueve los montos <20 %, no se controla
+    dfe, dfqe = frames(sym="ABC", cur="EUR")
+    co3, w3 = build_company("ABC", price, {"beta": 1.1, "priceToSalesTrailing12Months": 8000 / 1040}, {"sharesOutstanding": 200e6, "priceToBook": 8000 / 620},
+                            prof, {"financialCurrency": "EUR"}, trend, dfe, dfqe, fx)
+    assert abs(co3.fx - 1.10) < 1e-12 and not any("corregida" in x for x in w3)
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):
