@@ -648,6 +648,35 @@ def get_risk_free() -> Tuple[float, bool]:
     return RF_FALLBACK, False
 
 
+def currency_diagnostic(sym: str) -> Dict[str, object]:
+    """Diagnóstico de la moneda de los estados contables: lo que informa Yahoo (crudo), para comparar con lo que calcula la app.
+    No cambia ningún valor: solo consulta y devuelve los campos (None si no existen)."""
+    from yahooquery import Ticker
+    sym = sym.strip().upper()
+    t = Ticker(sym, timeout=20)
+
+    def mod(name):
+        try:
+            v = getattr(t, name)
+            v = v.get(sym) if isinstance(v, dict) else None
+            return v if isinstance(v, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+    sd, ks, fd = mod("summary_detail"), mod("key_stats"), mod("financial_data")
+    return {
+        "financialCurrency": fd.get("financialCurrency"),
+        "precio/ventas (Yahoo)": sf(sd.get("priceToSalesTrailing12Months")),
+        "precio/valor libro (Yahoo)": _first(sf(ks.get("priceToBook")), sf(sd.get("priceToBook"))),
+        "PER trailing (Yahoo)": _first(sf(sd.get("trailingPE")), sf(ks.get("trailingPE"))),
+        "BPA trailing (Yahoo)": sf(ks.get("trailingEps")),
+        "capitalización (Yahoo)": sf(sd.get("marketCap")),
+        "ingresos totales (Yahoo, crudo)": sf(fd.get("totalRevenue")),
+        "EBITDA (Yahoo, crudo)": sf(fd.get("ebitda")),
+        "deuda total (Yahoo, cruda)": sf(fd.get("totalDebt")),
+        "caja (Yahoo, cruda)": sf(fd.get("totalCash")),
+    }
+
+
 def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float] = None,
                  fin_cur_mode: str = "auto") -> Tuple[CompanyData, List[str]]:
     from yahooquery import Ticker

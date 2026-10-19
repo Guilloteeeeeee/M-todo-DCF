@@ -337,6 +337,26 @@ def test_moneda_manual_y_euro_no_se_corrigen_solos():
     assert abs(co3.fx - 1.10) < 1e-12 and not any("corregida" in x for x in w3)
 
 
+def test_diagnostico_de_moneda_devuelve_campos_de_yahoo():
+    import sys, types
+    class FakeTicker:
+        def __init__(self, sym, timeout=20): self.sym = sym
+        summary_detail = {"VAL": {"priceToSalesTrailing12Months": 1.35, "trailingPE": 9.0, "marketCap": 5.5e10}}
+        key_stats = {"VAL": {"priceToBook": 1.5, "trailingEps": 1.4}}
+        financial_data = {"VAL": {"financialCurrency": "BRL", "totalRevenue": 4.1e10}}
+    fake = types.ModuleType("yahooquery"); fake.Ticker = FakeTicker
+    old = sys.modules.get("yahooquery"); sys.modules["yahooquery"] = fake
+    try:
+        import data_yahoo
+        d = data_yahoo.currency_diagnostic(" val ")
+    finally:
+        if old is not None: sys.modules["yahooquery"] = old
+        else: sys.modules.pop("yahooquery", None)
+    assert d["financialCurrency"] == "BRL" and abs(d["precio/ventas (Yahoo)"] - 1.35) < 1e-9
+    assert abs(d["precio/valor libro (Yahoo)"] - 1.5) < 1e-9 and abs(d["BPA trailing (Yahoo)"] - 1.4) < 1e-9
+    assert d["EBITDA (Yahoo, crudo)"] is None          # lo que Yahoo no entrega queda en None
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

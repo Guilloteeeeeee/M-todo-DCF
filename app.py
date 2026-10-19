@@ -23,7 +23,7 @@ try:
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
-    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "statement_currency_check", "lote.py": "implied_wacc"}
+    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "currency_diagnostic", "lote.py": "implied_wacc"}
 
     def _tiene(archivo, marca):
         try:
@@ -83,11 +83,11 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.47 · 19/10/2026"
+APP_VERSION = "v2.47.1 · 19/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
-if not hasattr(data_yahoo, "statement_currency_check"):
-    st.warning("**data_yahoo.py es una versión vieja:** el control de la moneda de los estados contables (v2.47) NO está activo. "
+if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):
+    st.warning("**data_yahoo.py es una versión vieja:** falta el control o el diagnóstico de la moneda de los estados contables (v2.47.1). "
                "Subí data_yahoo.py de la v2.47 junto con los demás archivos y reiniciá la app.")
 
 MODEL_LABELS = {"FCFF": "Empresa común (todos los demás sectores)",
@@ -432,6 +432,29 @@ if _miss:
         _tip = (" Si la empresa no es de EE.UU., cargá la prima de riesgo país en la barra lateral." if "país" in _miss else "")
         st.warning(f"🟡 **Dato incompleto: no pude leer {_list} de la empresa en Yahoo.** "
                    f"{_detail[0].upper() + _detail[1:]} El efecto en la valuación es acotado.{_tip}{_retry}")
+
+if hasattr(data_yahoo, "currency_diagnostic") and (co.fin_currency != co.currency or any("Moneda de los estados contables" in w for w in load_warns)):
+    with st.expander("🔎 Diagnóstico de la moneda de los estados contables (compara Yahoo con la app)"):
+        st.caption("Solo consulta, no cambia ningún valor. Sirve para revisar si Yahoo rotuló bien la moneda de los estados contables.")
+        if st.button("Consultar a Yahoo", key=K("diagmon")):
+            try:
+                _dg = data_yahoo.currency_diagnostic(co.ticker)
+                _mc, _rev = co.market_cap_m, co.revenue_ttm
+                _fxu = co.fx if co.fx else 1.0
+                _rows = [("Moneda de cotización", co.currency), ("Moneda de los estados contables que usó la app", co.fin_currency),
+                         ("Tipo de cambio aplicado a los montos", f"{co.fx:.4f}"),
+                         ("Ingresos TTM de la app (M, ya en moneda de cotización)", f"{_rev:,.0f}"),
+                         ("Capitalización de la app (M)", f"{_mc:,.0f}"),
+                         ("Precio/ventas de la app", f"{(_mc / _rev):.2f}" if _rev else "-"),
+                         ("Precio/ventas de la app SI los montos no se hubieran convertido", f"{(_mc / (_rev / _fxu)):.2f}" if _rev else "-"),
+                         ("Patrimonio de la app (M)", f"{co.equity:,.0f}" if co.equity else "-"),
+                         ("Precio/valor libro de la app", f"{(_mc / co.equity):.2f}" if co.equity else "-"),
+                         ("Ganancia neta TTM de la app (M)", f"{co.ni_ttm:,.0f}" if co.ni_ttm else "-"),
+                         ("Precio/ganancia de la app", f"{(_mc / co.ni_ttm):.1f}" if co.ni_ttm else "-")]
+                _rows += [(k, ("-" if v is None else (f"{v:,.2f}" if isinstance(v, float) else str(v)))) for k, v in _dg.items()]
+                st.table(pd.DataFrame(_rows, columns=["Dato", "Valor"]).set_index("Dato"))
+            except Exception as _e:  # noqa: BLE001
+                st.error(f"No pude consultar a Yahoo: {_e}")
 
 if crp_auto:
     crp, crp_note = country_crp(co.country)
