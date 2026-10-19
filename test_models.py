@@ -783,6 +783,58 @@ def test_financiera_propia_resta_solo_la_deuda_propia():
     assert any("Financiera propia" in w for w in v_on.warnings)
 
 
+def _con_margenes(margenes, ttm, **kw):
+    """Empresa de prueba con la historia de margen EBIT dada (4 años) y el TTM; ingresos constantes."""
+    rev = [8_000.0, 8_800.0, 9_400.0, 9_800.0]
+    return industrial(revenue_hist=rev, ebit_hist=[r * m for r, m in zip(rev, margenes)],
+                      revenue_ttm=10_000.0, ebit_ttm=10_000.0 * ttm, **kw)
+
+
+def test_tendencia_clara_de_margen_usa_punto_medio():
+    """v2.46 «B suave»: margen que sube los 4 años seguidos -> objetivo = punto medio entre la mediana y el TTM."""
+    from dcf_models import clean_margin_trend
+    co = _con_margenes([0.10, 0.11, 0.12, 0.13], 0.14)      # mediana de [10,11,12,13,14] = 12 %, TTM 14 %
+    r = fcff_value(co, Params(moat_spread=0.02), SCENARIOS["Base"])
+    assert abs(r.extras["margin_target"] - 0.13) < 1e-9, r.extras["margin_target"]
+    assert r.extras["margin_rule"].startswith("punto medio") and "subió" in r.extras["margin_rule"]
+    # baja 4 años seguidos: mediana 16 %, TTM 12 % -> 14 %
+    co_b = _con_margenes([0.20, 0.18, 0.16, 0.14], 0.12)
+    rb = fcff_value(co_b, Params(moat_spread=0.02), SCENARIOS["Base"])
+    assert abs(rb.extras["margin_target"] - 0.14) < 1e-9 and "bajó" in rb.extras["margin_rule"]
+    # la función en sí
+    assert clean_margin_trend([0.10, 0.11, 0.12, 0.13], 0.14) == "sube"
+    assert clean_margin_trend([0.20, 0.18, 0.16, 0.14], 0.12) == "baja"
+    assert clean_margin_trend([0.10, 0.12, 0.11, 0.13], 0.14) is None          # un año rompe la serie
+    assert clean_margin_trend([0.11, 0.12, 0.13], 0.14) is None                # poca historia
+    assert clean_margin_trend([0.10, 0.10, 0.11, 0.12], 0.13) is None          # un paso plano no cuenta como subida
+
+
+def test_tendencia_de_margen_no_se_aplica_si_no_corresponde():
+    serie_rota = _con_margenes([0.10, 0.12, 0.11, 0.13], 0.14)                  # mediana 12 %
+    r = fcff_value(serie_rota, Params(moat_spread=0.02), SCENARIOS["Base"])
+    assert abs(r.extras["margin_target"] - 0.12) < 1e-9 and r.extras["margin_rule"].startswith("mediana")
+    # precio-aceptante: el último margen puede ser un pico del ciclo -> se queda la mediana
+    petroleo = _con_margenes([0.10, 0.11, 0.12, 0.13], 0.14, ind_name="Oil/Gas (Production and Exploration)")
+    rp = fcff_value(petroleo, Params(moat_spread=0.02), SCENARIOS["Base"])
+    assert abs(rp.extras["margin_target"] - 0.12) < 1e-9 and rp.extras["margin_rule"].startswith("mediana")
+    # el modo TTM / manual del usuario manda
+    limpio = _con_margenes([0.10, 0.11, 0.12, 0.13], 0.14)
+    rt = fcff_value(limpio, Params(moat_spread=0.02, margin_mode="ttm"), SCENARIOS["Base"])
+    assert abs(rt.extras["margin_target"] - 0.14) < 1e-9
+    rm = fcff_value(limpio, Params(moat_spread=0.02, margin_mode="manual", margin_manual=0.2), SCENARIOS["Base"])
+    assert abs(rm.extras["margin_target"] - 0.2) < 1e-9
+    # y los escenarios siguen ordenados con la regla activa
+    res = run_scenarios(limpio, Params(moat_spread=0.02), "FCFF")
+    assert res["Pesimista"].per_share <= res["Base"].per_share <= res["Optimista"].per_share
+    # sube -> valor mayor que con la mediana; baja -> menor
+    v_sube = fcff_value(limpio, Params(moat_spread=0.02), SCENARIOS["Base"]).per_share
+    v_med_sube = fcff_value(replace(limpio, ind_name="Steel"), Params(moat_spread=0.02), SCENARIOS["Base"]).per_share
+    assert v_sube > v_med_sube
+    baja = _con_margenes([0.20, 0.18, 0.16, 0.14], 0.12)
+    assert (fcff_value(baja, Params(moat_spread=0.02), SCENARIOS["Base"]).per_share
+            < fcff_value(replace(baja, ind_name="Steel"), Params(moat_spread=0.02), SCENARIOS["Base"]).per_share)
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):

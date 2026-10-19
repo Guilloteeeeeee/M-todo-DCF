@@ -526,6 +526,25 @@ def ttm_distorted(co: CompanyData, m0: float, mt_base: float) -> bool:
     return prev is None or co.revenue_ttm >= 0.97 * prev
 
 
+def clean_margin_trend(hist: List[float], m0: float, min_points: int = 4) -> Optional[str]:
+    """«sube» / «baja» si el margen operativo se movió en la misma dirección en TODOS los pasos (últimos años + TTM); si no, None.
+    Exige al menos `min_points` años de historia: un año raro (cargo único, pico) rompe la serie y la regla no se activa."""
+    seq = [h for h in hist if h is not None] + [m0]
+    if len(hist) < min_points or len(seq) < min_points + 1:
+        return None
+    steps = [seq[i] - seq[i - 1] for i in range(1, len(seq))]
+    if all(d > 0 for d in steps):
+        return "sube"
+    if all(d < 0 for d in steps):
+        return "baja"
+    return None
+
+
+def _is_price_taker(co: "CompanyData") -> bool:
+    """Industrias de precio-aceptante (materias primas, ciclo fuerte): el último margen puede ser un pico o un piso del ciclo."""
+    return (co.ind_name or "") in PRICE_TAKER_INDUSTRIES
+
+
 def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float, str]:
     """(margen inicial TTM, margen objetivo del escenario, descripción)."""
     if co.revenue_ttm <= 0:
@@ -559,6 +578,13 @@ def margin_target(co: CompanyData, p: Params, scen: Scen) -> Tuple[float, float,
     else:
         mt = _med(hist + [m0]) if hist else m0
         desc = f"mediana {len(hist)} años + TTM" if hist else "TTM (sin historia)"
+        trend = clean_margin_trend(hist, m0)
+        if trend and not _is_price_taker(co):
+            # v2.46 «B suave»: si el margen subió (o bajó) los 4 años seguidos, la mediana queda 2 años atrás de la realidad.
+            # Se usa el punto medio entre la mediana y el margen de hoy: corrige a medias y no apuesta a que el último año es el normal.
+            mt = (mt + m0) / 2.0
+            desc = (f"punto medio entre la mediana y el TTM (el margen {'subió' if trend == 'sube' else 'bajó'} "
+                    f"los {len(hist)} años seguidos)")
     if scen.m_rule == "pess":
         if m0 > 0 and ttm_distorted(co, m0, mt):
             # El TTM parece un año extraordinario: el piso pesimista no se ancla a él.
@@ -1083,7 +1109,7 @@ def fcff_value(co: CompanyData, p: Params, scen: Scen) -> ValResult:
         discount_rate=wacc, ke=ke, g_terminal=gT, tv_share=tv_share, table=rows, warnings=warns,
         extras=dict(wacc=wacc, wacc_T=wacc_T, ke=ke, kd=c["kd"], kd_note=c.get("kd_note", ""), we=c["we"], wd=c["wd"],
                     beta=c["beta"], rf=c["rf"], beta_T=terminal_beta(co, p),
-                    g1=g1, g2=g2, g_src=g_src, margin0=m0, margin_start=m_start, ttm_normalized=ttm_norm, margin_target=mT, roic0=roic0, roicT=roicT,
+                    g1=g1, g2=g2, g_src=g_src, margin0=m0, margin_start=m_start, ttm_normalized=ttm_norm, margin_target=mT, margin_rule=m_desc, roic0=roic0, roicT=roicT,
                     moat_label=moat_label, moat_reasons=moat_reasons, moat_src=moat_src, moat_partial=moat_partial,
                     captive_excl=(cf_info or {}).get('excl', 0.0),
                     exit_ev_ebit=exit_mult, tv_nopat=tv / nopat_N if nopat_N else float('nan'), roic_note=roic_note,

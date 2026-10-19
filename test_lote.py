@@ -126,6 +126,11 @@ def test_rescue_avisa_el_progreso():
     assert any("Esperando 7" in m for m in msgs) and any("Reintentando AAA" in m for m in msgs), msgs
 
 
+def test_columna_criterio_de_margen():
+    from lote import COLUMNS
+    assert "Criterio de margen" in COLUMNS and COLUMNS.index("Criterio de margen") == COLUMNS.index("TTM − objetivo (pp)") + 1
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):
