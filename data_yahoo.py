@@ -634,13 +634,15 @@ def unreliable_reasons(co: CompanyData) -> List[str]:
         return []
     miss = missing_fields(co)
     out = [f"falta {m}" for m in miss if m != "país"]
-    if "país" in miss and co.rev_g_y0 is None and co.rev_g_y1 is None:
+    if ("país" in miss or co.country_from) and co.rev_g_y0 is None and co.rev_g_y1 is None:
         out.append("faltan país y estimaciones de analistas (Yahoo bloqueó módulos)")
     return out
 
 
 def is_degraded(co: CompanyData) -> bool:
     """Carga incompleta (falta algún dato de perfil). Una carga así no se guarda en la caché, para que reintentar consulte de nuevo."""
+    if co.country_from and co.rev_g_y0 is None and co.rev_g_y1 is None and (not co.quote_type or co.quote_type == "EQUITY"):
+        return True        # país de respaldo + sin analistas: señal de que Yahoo limitó varios módulos; no se guarda en la caché
     return bool(missing_fields(co))
 
 
@@ -743,19 +745,19 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
         fb_price, fb_cur = _last_close(sym), _guess_currency(sym)
 
     # Reintentos: Yahoo a veces limita los módulos de perfil/cotización por unos segundos.
-    if not profile.get("industry") or not (price_m.get("longName") or price_m.get("shortName")):
+    if not profile.get("industry") or not profile.get("country") or not (price_m.get("longName") or price_m.get("shortName")):
         import time
         for wait in RETRY_WAITS:
             time.sleep(wait)
             try:
                 t2 = Ticker(sym, timeout=20)
-                if not profile.get("industry"):
+                if not profile.get("industry") or not profile.get("country"):
                     profile = mod(t2.asset_profile, sym) or profile
                 if not (price_m.get("longName") or price_m.get("shortName")):
                     price_m = mod(t2.price, sym) or price_m
             except Exception:
                 pass
-            if profile.get("industry") and (price_m.get("longName") or price_m.get("shortName")):
+            if profile.get("industry") and profile.get("country") and (price_m.get("longName") or price_m.get("shortName")):
                 if "perfil (sector/industria/país)" in failed:
                     failed.remove("perfil (sector/industria/país)")
                 break
@@ -779,6 +781,22 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
             alt = {**alt, "search": True}
         if sp.get("name") and not (price_m.get("longName") or price_m.get("shortName")):
             price_m = {**price_m, "longName": sp["name"]}
+    mem_used = []
+    try:                                               # memoria de cargas buenas anteriores: completa lo que Yahoo no entregó
+        import profile_fallback as pf
+        _mem = pf.recall(sym)
+        for _k in ("sector", "industry"):
+            if _mem.get(_k) and not profile.get(_k):
+                profile = {**profile, _k: _mem[_k]}
+                mem_used.append(_k)
+        if _mem.get("name") and not (price_m.get("longName") or price_m.get("shortName")):
+            price_m = {**price_m, "longName": _mem["name"]}
+        _ratio = _mem.get("adr_ratio") or pf.ADR_RATIO.get(sym.upper())
+        if _ratio and not adr_ratio and not sf(price_m.get("marketCap")) and not sf(summary.get("marketCap")):
+            adr_ratio = float(_ratio)                  # solo importa si Yahoo no dio la capitalización
+            mem_used.append(f"ratio de ADR {adr_ratio:g}")
+    except Exception:  # noqa: BLE001
+        pass
     if ("g0" in alt or "g1" in alt) and not any(
             i.get("revenueEstimate") for i in (trend.get("trend") or []) if isinstance(i, dict)):
         trend = {"trend": [{"period": "0y", "revenueEstimate": {"growth": alt.get("g0")}},
@@ -793,6 +811,25 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
                               fin_cur_mode=fin_cur_mode)
     if not ok:
         warns.append(f"No pude leer la tasa del Tesoro a 10 años: se usó Rf = {RF_FALLBACK:.2%}.")
+    if mem_used:
+        warns.append("Completado con la memoria de la app / tabla propia porque Yahoo no lo entregó: " + ", ".join(mem_used)
+                     + (" (el ratio de ADR puede haber cambiado: verificalo si el valor por acción te parece raro)." if any("ADR" in x for x in mem_used) else "."))
+    if not co.country and (not co.quote_type or co.quote_type == "EQUITY"):
+        try:
+            import profile_fallback as pf
+            _hit = pf.country_chain(sym, co.name, co.fin_currency)
+            if _hit:
+                co.country, co.country_from = _hit
+                warns.append(f"País ({co.country}) no informado por Yahoo: tomado de {co.country_from}.")
+        except Exception:  # noqa: BLE001
+            pass
+    if not is_degraded(co) and not co.country_from:    # carga buena y completa: se recuerda para cuando Yahoo falle
+        try:
+            import profile_fallback as pf
+            _ar = pf.learned_ratio(co.shares_m, co.reported_shares_m, co.fin_currency, co.currency)
+            pf.remember(sym, {"country": co.country, "sector": co.sector, "industry": co.industry, "name": co.name, "adr_ratio": _ar})
+        except Exception:  # noqa: BLE001
+            pass
     if alt:
         warns.append("Sector/industria/estimaciones/beta completados con una fuente alternativa (yfinance / buscador de Yahoo).")
     miss = missing_fields(co)

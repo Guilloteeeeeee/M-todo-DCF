@@ -1,4 +1,6 @@
 """Pruebas de la capa de datos con DataFrames sintéticos con la forma de yahooquery."""
+import os, tempfile
+os.environ["DCF_PROFILE_MEMORY"] = _GLOBAL_MEM = os.path.join(tempfile.mkdtemp(), "mem.json")   # las pruebas no tocan la memoria real
 import pandas as pd, numpy as np
 from data_yahoo import build_company, DataError
 from dcf_models import Params, value_company, route_model
@@ -150,6 +152,8 @@ def test_load_company_retry_and_degraded():
         dy.estimate_beta = lambda sym: 1.0
         dy.RETRY_WAITS = (0.0, 0.0)
         for works_on, expect_degraded in ((2, False), (99, True)):
+            if os.path.exists(_GLOBAL_MEM):
+                os.remove(_GLOBAL_MEM)                                       # cada caso parte sin memoria
             T, calls = make_ticker(works_on)
             sys.modules["yahooquery"] = types.SimpleNamespace(Ticker=T)
             co, w = dy.load_company("ABC")
@@ -158,6 +162,88 @@ def test_load_company_retry_and_degraded():
             assert calls["n"] == (2 if works_on == 2 else 3), calls          # 1 inicial + reintentos
             if expect_degraded:
                 assert any("perfil (sector/industria/país)" in x for x in w), w
+    finally:
+        for k, v in saved.items():
+            setattr(dy, k, v)
+        sys.modules.pop("yahooquery", None)
+
+
+def test_pais_de_respaldo_desde_planilla_de_damodaran():
+    """Yahoo no entrega el país (perfil limitado): se toma de la planilla de Damodaran (VALE -> Brazil, TSM -> Taiwan);
+    con país de respaldo y sin analistas la carga se considera degradada."""
+    import damodaran_map as dm
+    from dcf_models import CompanyData
+    assert dm.lookup_country("VALE", "Vale S.A.")[0] == "Brazil"
+    assert dm.lookup_country("TSM", "Taiwan Semiconductor Manufacturing Company Limited")[0] == "Taiwan"
+    assert dm.lookup_country("KO", "The Coca-Cola Company")[0] == "United States"
+    assert dm.lookup_country("7203.T", "")[0] == "Japan"
+    assert dm.lookup_country("ZZZZ", "Empresa Inexistente S.A.") is None
+    import data_yahoo as dy
+    base = dict(ticker="VALE", name="Vale S.A.", sector="Basic Materials", industry="Other Industrial Metals & Mining",
+                country="Brazil", quote_type="EQUITY", country_from="planilla de Damodaran (BOVESPA:VALE3, por nombre)")
+    assert dy.is_degraded(CompanyData(**base))                                   # sin analistas: no se guarda en la caché
+    assert not dy.is_degraded(CompanyData(**base, rev_g_y0=0.03))               # con analistas: carga normal
+    assert dy.unreliable_reasons(CompanyData(**base)) and not dy.unreliable_reasons(CompanyData(**base, rev_g_y0=0.03))
+
+
+def test_respaldos_de_pais_y_adr_cuando_yahoo_bloquea():
+    """PBR no está en la planilla de Damodaran: lo resuelve la tabla propia. Las capas: memoria -> tabla propia -> Damodaran -> moneda."""
+    import os, tempfile
+    import profile_fallback as pf
+    from country_risk import ALIASES, CRP
+    assert all(ALIASES.get(c, c) in CRP for c in set(pf.ADR_COUNTRY.values()) | set(pf.CURRENCY_COUNTRY.values()))   # países que la tabla de riesgo conoce
+    assert not (set(pf.ADR_COUNTRY) & {"MELI", "NU", "PDD"})                       # los dudosos no están
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["DCF_PROFILE_MEMORY"] = os.path.join(td, "mem.json")
+        try:
+            assert pf.country_chain("PBR", "Petróleo Brasileiro S.A. - Petrobras", "BRL")[0] == "Brazil"
+            assert pf.country_chain("VALE", "Vale S.A.", "USD")[0] == "Brazil"
+            assert pf.country_chain("XXXX", "Desconocida", "TWD")[0] == "Taiwan"            # por moneda
+            assert pf.country_chain("XXXX", "Desconocida", "USD") is None and pf.country_chain("XXXX", "Desconocida", "EUR") is None
+            pf.remember("ZZZ", {"country": "Chile", "sector": "S", "industry": "I", "name": "Zeta", "adr_ratio": None})
+            assert pf.recall("ZZZ")["country"] == "Chile" and pf.country_chain("ZZZ", "", "USD")[0] == "Chile"
+            assert pf.recall("QQQ") == {}
+            assert pf.learned_ratio(25.9 / 5, 25.9, "TWD", "USD") == 5.0 and pf.learned_ratio(10, 10, "USD", "USD") is None
+        finally:
+            os.environ["DCF_PROFILE_MEMORY"] = _GLOBAL_MEM
+
+
+def test_load_company_con_yahoo_bloqueado_usa_respaldos():
+    """Caso TSM real: sin país ni capitalización (perfil y cotización bloqueados). Con los respaldos queda país Taiwan y ratio de ADR 5."""
+    import os, sys, tempfile, types
+    import data_yahoo as dy
+    dfa, dfq = frames(sym="TSM", cur="TWD")
+    class FT:
+        def __init__(self, sym, timeout=20): self.sym = sym.upper()
+        price = property(lambda s: {s.sym: "Quote not found"})
+        summary_detail = property(lambda s: {s.sym: "Quote not found"})
+        key_stats = property(lambda s: {s.sym: {"sharesOutstanding": 200e6}})
+        financial_data = property(lambda s: {s.sym: "Quote not found"})
+        earnings_trend = property(lambda s: {s.sym: "Quote not found"})
+        asset_profile = property(lambda s: {s.sym: "Quote not found"})
+        def get_financial_data(self, fields, frequency="a", trailing=True):
+            return dfa if frequency == "a" else dfq
+    saved = {k: getattr(dy, k) for k in ("get_risk_free", "yf_fallback", "search_profile", "estimate_beta", "RETRY_WAITS", "_last_close", "_guess_currency", "get_fx")} if hasattr(dy, "get_fx") else \
+            {k: getattr(dy, k) for k in ("get_risk_free", "yf_fallback", "search_profile", "estimate_beta", "RETRY_WAITS", "_last_close", "_guess_currency")}
+    try:
+        dy.get_risk_free = lambda: (0.04, True)
+        dy.yf_fallback = lambda sym: {}
+        dy.search_profile = lambda sym: {"sector": "Technology", "industry": "Semiconductors", "name": "Taiwan Semiconductor Manufacturing Company Limited"}
+        dy.estimate_beta = lambda sym: 1.2
+        dy.RETRY_WAITS = ()
+        dy._last_close = lambda sym: 180.0
+        dy._guess_currency = lambda sym: "USD"
+        sys.modules["yahooquery"] = types.SimpleNamespace(Ticker=FT)
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["DCF_PROFILE_MEMORY"] = os.path.join(td, "mem.json")
+            try:
+                co, w = dy.load_company("TSM")
+            finally:
+                os.environ["DCF_PROFILE_MEMORY"] = _GLOBAL_MEM
+        assert co.country == "Taiwan" and "tabla propia" in co.country_from, (co.country, co.country_from)
+        assert not co.cap_estimated and abs(co.shares_m - 40.0) < 1e-6, (co.cap_estimated, co.shares_m)
+        assert any("ratio de ADR 5" in x for x in w), w
+        assert dy.is_degraded(co)                                  # sin analistas: no se guarda en la caché
     finally:
         for k, v in saved.items():
             setattr(dy, k, v)

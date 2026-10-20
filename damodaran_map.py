@@ -55,7 +55,7 @@ def _norm_name(s: str) -> str:
 def _load() -> dict:
     if _STATE:
         return _STATE
-    by_ex: Dict[str, Dict[str, Tuple[str, str]]] = {}
+    by_ex: Dict[str, Dict[str, Tuple[str, str, str]]] = {}
     by_name: Dict[str, List[Tuple[str, str, str]]] = {}
     n = 0
     try:
@@ -68,7 +68,7 @@ def _load() -> dict:
                 if ":" not in xt:
                     continue
                 ex, tk = xt.split(":", 1)
-                by_ex.setdefault(ex, {}).setdefault(_key(tk, ex), (grp, xt))
+                by_ex.setdefault(ex, {}).setdefault(_key(tk, ex), (grp, xt, country))
                 nn = _norm_name(nm)
                 if len(nn) >= 3:
                     by_name.setdefault(nn, []).append((grp, xt, country))
@@ -111,4 +111,33 @@ def lookup(ticker: str, name: str = "", country: str = "") -> Optional[Tuple[str
             same = [x for x in c if x[2].strip().lower() == country.strip().lower()]
             if len(same) == 1:
                 return same[0][0], f"{same[0][1]}, por nombre"
+    return None
+
+
+def lookup_country(ticker: str, name: str = "") -> Optional[Tuple[str, str]]:
+    """(país, de dónde salió) o None. Respaldo para cuando Yahoo no entrega el país: lo toma de la misma planilla de Damodaran,
+    buscando igual que lookup() (ticker de EE.UU., ticker con sufijo, o nombre si hay una única coincidencia).
+    El país es el de la bolsa principal de la planilla (ej. VALE -> Brazil, TSM -> Taiwan)."""
+    st = _load()
+    by_ex, by_name = st.get("by_ex") or {}, st.get("by_name") or {}
+    if not by_ex:
+        return None
+    sym = (ticker or "").strip().upper()
+    if sym:
+        base, suf = (sym.rsplit(".", 1) + [""])[:2] if "." in sym else (sym, "")
+        if suf and suf in SUFFIX:
+            for ex in SUFFIX[suf]:
+                hit = by_ex.get(ex, {}).get(_key(base, ex))
+                if hit and hit[2]:
+                    return hit[2], f"{hit[1]}, por ticker"
+        else:
+            for ex in US_EXCH + ("OTCPK",):
+                hit = by_ex.get(ex, {}).get(_key(sym, ex))
+                if hit and hit[2]:
+                    return hit[2], f"{hit[1]}, por ticker"
+    nn = _norm_name(name)
+    if len(nn) >= 3:
+        c = by_name.get(nn) or []
+        if len(c) == 1 and c[0][2]:
+            return c[0][2], f"{c[0][1]}, por nombre"
     return None

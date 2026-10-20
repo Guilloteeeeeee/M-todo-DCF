@@ -113,6 +113,7 @@ class CompanyData:
     # --- flujo de caja real de Yahoo (v2.48; para el método estilo Dorsey)
     fcf_ttm: Optional[float] = None    # flujo de caja libre = flujo operativo − inversión, últimos 12 meses (M, moneda de cotización)
     cfo_ttm: Optional[float] = None    # flujo de caja operativo, últimos 12 meses
+    country_from: str = ""              # vacío = el país vino de Yahoo; si no, de dónde se tomó (planilla de Damodaran)
 
     # --- referencia
     target_price: Optional[float] = None

@@ -25,7 +25,7 @@ try:
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
-    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "EXTRA_FLOW_FIELDS", "lote.py": "methods_map",
+    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup_country", "data_yahoo.py": "profile_fallback", "profile_fallback.py": "def country_chain", "lote.py": "methods_map",
                "methods_map.py": "def methods_map", "industry_multiples.py": "def get_multiples"}
 
     def _tiene(archivo, marca):
@@ -86,7 +86,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.48 · 20/10/2026"
+APP_VERSION = "v2.50 · 20/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):
@@ -436,6 +436,12 @@ if _miss:
         st.warning(f"🟡 **Dato incompleto: no pude leer {_list} de la empresa en Yahoo.** "
                    f"{_detail[0].upper() + _detail[1:]} El efecto en la valuación es acotado.{_tip}{_retry}")
 
+if getattr(co, "country_from", ""):
+    st.info(f"ℹ️ Yahoo no entregó el país: se tomó **{co.country}** de {co.country_from}, para no perder la prima de riesgo país y el impuesto del país.")
+    if co.rev_g_y0 is None and co.rev_g_y1 is None:
+        st.warning("🟡 Yahoo limitó varios módulos a la vez (tampoco llegaron las estimaciones de analistas): el valor puede cambiar al reintentar. "
+                   "Esta carga no se guarda; probá de nuevo en unos minutos.")
+
 if hasattr(data_yahoo, "currency_diagnostic") and (co.fin_currency != co.currency or any("Moneda de los estados contables" in w for w in load_warns)):
     with st.expander("🔎 Diagnóstico de la moneda de los estados contables (compara Yahoo con la app)"):
         st.caption("Solo consulta, no cambia ningún valor. Sirve para revisar si Yahoo rotuló bien la moneda de los estados contables.")
@@ -651,15 +657,7 @@ elif base.ok:
                     v_txt, r_txt = money(it["valor"], co.currency), f"{it['ratio']:.2f}×"
                 _rows.append({"Método": it["nombre"], "Valor por acción": v_txt, "Valor ÷ precio": r_txt, "Qué es": it["nota"]})
             st.dataframe(pd.DataFrame(_rows).set_index("Método"), **STRETCH)
-            _cd = pd.DataFrame([{"Método": it["nombre"].split(" (")[0], "Valor": it["valor"], "Tipo": "circular" if it["circular"] else "independiente"}
-                                for it in mp["items"] if it["valor"] is not None])
-            if not _cd.empty:
-                _bars = alt.Chart(_cd).mark_bar().encode(
-                    y=alt.Y("Método:N", sort=None, title=None), x=alt.X("Valor:Q", title=f"Valor por acción ({co.currency})"),
-                    color=alt.Color("Tipo:N", legend=None, scale=alt.Scale(domain=["independiente", "circular"], range=["#4f81bd", "#aaaaaa"])))
-                _rl = alt.Chart(pd.DataFrame({"x": [co.price]})).mark_rule(strokeDash=[6, 4], color="#444", size=2).encode(x="x:Q")
-                st.altair_chart((_bars + _rl).properties(height=40 * len(_cd) + 40), **STRETCH)
-                st.caption(f"Línea punteada: precio actual {money(co.price, co.currency)}. Gris: método circular (el valor sale cerca del precio por construcción).")
+            st.caption("El método 5 es circular: usa el múltiplo que paga hoy el mercado, así que su valor sale cerca del precio por construcción.")
             if mp["rango"]:
                 st.markdown(f"**Rango de los métodos independientes (1 a 4):** {money(mp['rango'][0], co.currency)} – {money(mp['rango'][1], co.currency)} "
                             f"contra un precio de {money(co.price, co.currency)}. No se promedian: cada uno responde una pregunta distinta y tres comparten la tasa de descuento.")
