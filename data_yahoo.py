@@ -20,6 +20,9 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 from dcf_models import CompanyData
+import profile_fallback            # v2.50: respaldos de país / ADR (si falta el archivo, la app lo avisa al arrancar)
+
+PROFILE_FALLBACK = True            # marca para que app.py detecte un data_yahoo.py viejo
 
 RF_FALLBACK = 0.052   # último recurso (bono 10 años EE.UU. ~5,22 % al 08/10/2026, FRED); se usa solo si fallan todas las fuentes en vivo
 PENCE = {"GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0), "ZAc": ("ZAR", 100.0), "ZAC": ("ZAR", 100.0),
@@ -795,8 +798,8 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
         if _ratio and not adr_ratio and not sf(price_m.get("marketCap")) and not sf(summary.get("marketCap")):
             adr_ratio = float(_ratio)                  # solo importa si Yahoo no dio la capitalización
             mem_used.append(f"ratio de ADR {adr_ratio:g}")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as _e:  # noqa: BLE001
+        mem_used.append(f"(falló la memoria: {_e})")
     if ("g0" in alt or "g1" in alt) and not any(
             i.get("revenueEstimate") for i in (trend.get("trend") or []) if isinstance(i, dict)):
         trend = {"trend": [{"period": "0y", "revenueEstimate": {"growth": alt.get("g0")}},
@@ -821,8 +824,8 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
             if _hit:
                 co.country, co.country_from = _hit
                 warns.append(f"País ({co.country}) no informado por Yahoo: tomado de {co.country_from}.")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _e:  # noqa: BLE001
+            warns.append(f"⚠️ Falló el respaldo del país: {_e}")
     if not is_degraded(co) and not co.country_from:    # carga buena y completa: se recuerda para cuando Yahoo falle
         try:
             import profile_fallback as pf

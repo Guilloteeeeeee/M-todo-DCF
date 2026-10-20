@@ -48,6 +48,12 @@ except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o
     st.stop()
 
 
+if not getattr(data_yahoo, "PROFILE_FALLBACK", False):
+    st.error("**data_yahoo.py del repositorio es una versión vieja** (no tiene los respaldos de país de la v2.50). "
+             "Subilo de nuevo desde el zip v2.50, junto con **profile_fallback.py** (archivo nuevo), y hacé Reboot app.")
+    st.stop()
+
+
 def _stretch():
     """Compatibilidad entre versiones de Streamlit (use_container_width fue reemplazado por width='stretch')."""
     try:
@@ -86,7 +92,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.50 · 20/10/2026"
+APP_VERSION = "v2.51 · 20/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):

@@ -31,6 +31,7 @@ def load_company(sym, allow_annual=False, adr_ratio=None, fin_cur_mode="auto"):
     if sym == "NOC": return industrial(ticker="NOC", country=""), []          # falta solo el país
     return industrial(ticker=sym, fcf_ttm=900.0), []
 fake.load_company = load_company
+fake.PROFILE_FALLBACK = True
 sys.modules["data_yahoo"] = fake
 
 def run(sym, **setup):
