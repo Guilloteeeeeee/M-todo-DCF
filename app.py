@@ -92,7 +92,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.51 · 20/10/2026"
+APP_VERSION = "v2.52 · 20/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):
@@ -624,16 +624,6 @@ st.download_button("⬇️ Descargar resultado en Excel",
                    file_name=f"DCF_{co.ticker}_{datetime.now():%Y%m%d}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-chart_df = pd.DataFrame({"Escenario": [n for n in SCEN_ORDER if res[n].ok],
-                         "Valor": [res[n].per_share for n in SCEN_ORDER if res[n].ok]})
-bars = alt.Chart(chart_df).mark_bar().encode(
-    x=alt.X("Escenario:N", sort=SCEN_ORDER, axis=alt.Axis(labelAngle=0)), y=alt.Y("Valor:Q", title=f"Valor por acción ({co.currency})"),
-    color=alt.Color("Escenario:N", sort=SCEN_ORDER, legend=None,
-                    scale=alt.Scale(domain=SCEN_ORDER, range=["#c0504d", "#4f81bd", "#4e9a51"])))
-rule = alt.Chart(pd.DataFrame({"y": [co.price]})).mark_rule(strokeDash=[6, 4], color="#444", size=2).encode(y="y:Q")
-label = alt.Chart(pd.DataFrame({"y": [co.price], "t": [f"Precio actual {co.price:,.2f}"]})).mark_text(
-    align="left", dx=4, dy=-6, color="#444").encode(y="y:Q", text="t:N", x=alt.value(4))
-st.altair_chart((bars + rule + label).properties(height=300), **STRETCH)
 
 # ----------------------------------------------------------------------------
 # Mapa de métodos (v2.48): otras formas de mirar el valor, al lado del DCF. No cambian el valor del modelo.
@@ -663,7 +653,15 @@ elif base.ok:
                     v_txt, r_txt = money(it["valor"], co.currency), f"{it['ratio']:.2f}×"
                 _rows.append({"Método": it["nombre"], "Valor por acción": v_txt, "Valor ÷ precio": r_txt, "Qué es": it["nota"]})
             st.dataframe(pd.DataFrame(_rows).set_index("Método"), **STRETCH)
-            st.caption("El método 5 es circular: usa el múltiplo que paga hoy el mercado, así que su valor sale cerca del precio por construcción.")
+            _cd = pd.DataFrame([{"Método": it["nombre"].split(" (")[0], "Valor": it["valor"], "Tipo": "circular" if it["circular"] else "independiente"}
+                                for it in mp["items"] if it["valor"] is not None])
+            if not _cd.empty:
+                _bars = alt.Chart(_cd).mark_bar().encode(
+                    y=alt.Y("Método:N", sort=None, title=None), x=alt.X("Valor:Q", title=f"Valor por acción ({co.currency})"),
+                    color=alt.Color("Tipo:N", legend=None, scale=alt.Scale(domain=["independiente", "circular"], range=["#4f81bd", "#aaaaaa"])))
+                _rl = alt.Chart(pd.DataFrame({"x": [co.price]})).mark_rule(strokeDash=[6, 4], color="#444", size=2).encode(x="x:Q")
+                st.altair_chart((_bars + _rl).properties(height=40 * len(_cd) + 40), **STRETCH)
+                st.caption(f"Línea punteada: precio actual {money(co.price, co.currency)}. Gris: método circular (el valor sale cerca del precio por construcción).")
             if mp["rango"]:
                 st.markdown(f"**Rango de los métodos independientes (1 a 4):** {money(mp['rango'][0], co.currency)} – {money(mp['rango'][1], co.currency)} "
                             f"contra un precio de {money(co.price, co.currency)}. No se promedian: cada uno responde una pregunta distinta y tres comparten la tasa de descuento.")
