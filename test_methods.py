@@ -115,6 +115,37 @@ def test_tabla_de_multiplos_cubre_las_industrias_y_dorsey_sube_con_el_crecimient
     assert vs[0] < vs[1] < vs[2]
 
 
+def _it(key, ratio, price=100.0):
+    return dict(key=key, valor=None if ratio is None else ratio * price, circular=(key == "m5"))
+
+
+def test_combinado_reglas():
+    """v2.54: mediana con 3+, promedio con 2, el circular nunca entra, múltiplo extremo excluye 2 y 4, marca de coincidencia ±25 %."""
+    c = mm.combine([_it("m1", 1.0), _it("m2", 1.1), _it("m3", 0.9), _it("m4", 1.05), _it("m5", 5.0)], 100.0, 14.0)
+    assert c["regla"] == "mediana" and c["keys"] == ["m1", "m2", "m3", "m4"] and abs(c["ratio"] - 1.025) < 1e-9
+    assert c["coinciden"] is True and c["marca"] == "coinciden" and "m5" in c["excluidos"]
+    # un método loco no mueve la mediana, pero la marca avisa
+    c = mm.combine([_it("m1", 1.0), _it("m2", 1.1), _it("m3", 0.2), _it("m4", 1.05)], 100.0, 14.0)
+    assert abs(c["ratio"] - 1.025) < 1e-9 and c["coinciden"] is False and c["marca"].startswith("no coinciden")
+    # con 2 métodos, promedio
+    c = mm.combine([_it("m1", 1.0), _it("m2", None), _it("m3", 1.2), _it("m4", None)], 100.0, 14.0)
+    assert c["regla"] == "promedio" and abs(c["ratio"] - 1.1) < 1e-9 and c["excluidos"]["m2"] == "no aplica a esta empresa"
+    # múltiplo extremo: salen 2 y 4; queda 1 solo -> sin combinado
+    c = mm.combine([_it("m1", 1.0), _it("m2", 9.0), _it("m3", None), _it("m4", 8.0)], 100.0, 47.8)
+    assert c["ratio"] is None and "un solo método" in c["marca"] and "extremo" in c["excluidos"]["m2"] and "extremo" in c["excluidos"]["m4"]
+    # valores negativos no entran
+    c = mm.combine([_it("m1", 1.0), _it("m2", -0.5), _it("m3", 1.1), _it("m4", 1.2)], 100.0, 14.0)
+    assert c["keys"] == ["m1", "m3", "m4"] and "negativo" in c["excluidos"]["m2"]
+
+
+def test_combinado_en_el_mapa():
+    co, res = _base()
+    mp = mm.methods_map(co, res, "FCFF")
+    cb = mp["combinado"]
+    assert cb and cb["ratio"] is not None and "m5" not in cb["keys"] and cb["lo"] <= cb["valor"] <= cb["hi"]
+    assert mm.methods_map(co, res, "FFE")["combinado"] is None
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

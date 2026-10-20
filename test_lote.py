@@ -150,8 +150,18 @@ def test_columnas_del_mapa_de_metodos():
     wb = openpyxl.load_workbook(io.BytesIO(xl))
     hdr = [c.value for c in wb["Lote"][1]]
     assert "Método 3 ÷ precio" in hdr and "Múltiplo EV/EBIT requerido en 5a" in hdr
+    # v2.54: valor combinado
+    for k in ("Valor combinado ÷ precio", "Combinado: regla", "Combinado: métodos", "Combinado: mín ÷ precio", "Combinado: máx ÷ precio", "Combinado: marca"):
+        assert k in row and row[k] is not None, k
+        assert k in lote.COLUMNS, k
+    assert "5" not in row["Combinado: métodos"] and row["Combinado: mín ÷ precio"] <= row["Valor combinado ÷ precio"] <= row["Combinado: máx ÷ precio"]
+    assert "Valor combinado ÷ precio" in hdr and "métodos no coinciden" in lote.FLAG_HELP
     # las banderas nuevas tienen explicación
     assert "precio sobre todos los métodos" in lote.FLAG_HELP and "precio bajo todos los métodos" in lote.FLAG_HELP
+
+
+def test_ritmo_del_lote_ante_bloqueo():
+    assert lote.pace(5, 0) == 5 and lote.pace(5, 1) == 25 and lote.pace(5, 2) == 45 and lote.BAD_STREAK_STOP == 3
 
 
 if __name__ == "__main__":

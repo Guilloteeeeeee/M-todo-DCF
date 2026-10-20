@@ -58,6 +58,7 @@ FLAG_HELP = {
     "ROIC normalizado": "El ROIC inicial normalizado difiere más de 3 pp del ROIC con el TTM.",
     "WACC extremo": "WACC menor a 6 % o mayor a 12 %.",
     "controles ⚠️": "Hay datos con controles en estado REVISAR.",
+    "métodos no coinciden": "Los métodos que entran al valor combinado (1 a 4, sin el circular y sin los de múltiplo extremo) se alejan más de ±25 % del valor combinado: no te fíes del promedio.",
     "precio sobre todos los métodos": "El precio está por encima del valor de TODOS los métodos independientes (1 a 4): nuestro DCF, el DCF a 5 años con múltiplo de la industria, Dorsey y los múltiplos de la industria. Solo el método circular (5) se le acerca.",
     "precio bajo todos los métodos": "El precio está por debajo del valor de TODOS los métodos independientes (1 a 4).",
 }
@@ -198,6 +199,15 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
                             row["Banderas"] = (row.get("Banderas", "") + " · " if row.get("Banderas") else "") + "precio sobre todos los métodos"
                         elif lo > 1.0:
                             row["Banderas"] = (row.get("Banderas", "") + " · " if row.get("Banderas") else "") + "precio bajo todos los métodos"
+                    cb = mp.get("combinado")
+                    if cb:
+                        row.update({"Valor combinado ÷ precio": _f(cb["ratio"]), "Combinado: regla": cb["regla"],
+                                    "Combinado: métodos": ",".join(k[1] for k in cb["keys"]),
+                                    "Combinado: mín ÷ precio": _f(cb["lo_ratio"]), "Combinado: máx ÷ precio": _f(cb["hi_ratio"]),
+                                    "Combinado: desvío máx": _f(cb["desvio_max"]), "Combinado: marca": cb["marca"],
+                                    "Combinado: excluidos": "; ".join(f"{k[1]}: {m}" for k, m in cb["excluidos"].items() if k != "m5")})
+                        if cb["coinciden"] is False:
+                            row["Banderas"] = (row.get("Banderas", "") + " · " if row.get("Banderas") else "") + "métodos no coinciden"
                     pn = mp["panel"]
                     if pn:
                         row.update({"Retorno anual 5a (múltiplo de hoy)": _f(pn["retorno_mult_hoy"]), "Múltiplo EV/EBIT hoy": _f(pn["mult_hoy"]),
@@ -217,6 +227,15 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
 
 
 RESCUE_STATES = ("No confiable",)
+
+
+BAD_PAUSE = 20.0           # pausa extra después de una empresa "No confiable" (Yahoo nos está limitando)
+BAD_STREAK_STOP = 3        # con tantas "No confiables" seguidas se frena la tanda: insistir solo alarga el bloqueo
+
+
+def pace(base: float, bad_streak: int) -> float:
+    """Segundos de pausa antes de la próxima empresa: la base; si la última salió 'No confiable', mucho más (crece con la racha)."""
+    return float(base) + (BAD_PAUSE * min(bad_streak, 3) if bad_streak > 0 else 0.0)
 
 
 def rescue(rows: List[dict], raws: Dict[str, str], load_fn: Callable, waits=(10.0,), sleep: Callable = time.sleep,
@@ -264,6 +283,7 @@ COLUMNS = ["Ticker", "Empresa", "Estado", "Modelo", "Sector", "Industria", "Paí
            "Margen TTM", "Margen objetivo", "TTM − objetivo (pp)", "Criterio de margen", "ROIC inicial", "ROIC terminal",
            "Foso", "Origen foso", "Etapa", "P(quiebra 10a)", "I+D capitalizado (M)", "VT / EV", "EV/EBIT salida", "Pensiones (M)", "Pensiones / patrimonio", "WACC implícito (precio)", "WACC modelo − implícito (pp)",
            "Método 2 ÷ precio", "Método 3 ÷ precio", "Método 4 ÷ precio", "Método 5 (circular) ÷ precio", "Métodos 1-4: mín ÷ precio", "Métodos 1-4: máx ÷ precio",
+           "Valor combinado ÷ precio", "Combinado: regla", "Combinado: métodos", "Combinado: mín ÷ precio", "Combinado: máx ÷ precio", "Combinado: desvío máx", "Combinado: marca", "Combinado: excluidos",
            "Retorno anual 5a (múltiplo de hoy)", "Múltiplo EV/EBIT hoy", "Múltiplo EV/EBIT requerido en 5a", "FCF real TTM (M)", "Avisos (n)", "Controles ⚠️ (n)",
            "Datos faltantes", "Banderas", "Primer aviso", "Detalle", "Segundos"]
 
@@ -300,7 +320,8 @@ def build_excel(rows: List[dict], raws: Dict[str, str]) -> bytes:
                    "ROIC inicial": "0.0%", "ROIC terminal": "0.0%", "VT / EV": "0%", "P(quiebra 10a)": "0%", "Pesimista": "0.00", "Base": "0.00", "Optimista": "0.00",
                    "Pensiones / patrimonio": "0%", "WACC implícito (precio)": "0.00%", "WACC modelo − implícito (pp)": "0.00",
                    "Método 2 ÷ precio": "0.00", "Método 3 ÷ precio": "0.00", "Método 4 ÷ precio": "0.00", "Método 5 (circular) ÷ precio": "0.00",
-                   "Métodos 1-4: mín ÷ precio": "0.00", "Métodos 1-4: máx ÷ precio": "0.00", "Retorno anual 5a (múltiplo de hoy)": "0.0%",
+                   "Métodos 1-4: mín ÷ precio": "0.00", "Métodos 1-4: máx ÷ precio": "0.00",
+                   "Valor combinado ÷ precio": "0.00", "Combinado: mín ÷ precio": "0.00", "Combinado: máx ÷ precio": "0.00", "Combinado: desvío máx": "0%", "Retorno anual 5a (múltiplo de hoy)": "0.0%",
                    "Múltiplo EV/EBIT hoy": "0.0", "Múltiplo EV/EBIT requerido en 5a": "0.0"}
             for i, col in enumerate(df.columns, start=1):
                 if col in pct:
@@ -340,7 +361,8 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
     tanda = c1.number_input("Empresas por tanda", 5, 60, 10, 5,
                             help="Cada vez que apretás el botón se valúan las próximas empresas pendientes. "
                                  "Tandas chicas evitan que Yahoo limite las consultas.")
-    pausa = c2.number_input("Pausa entre empresas (seg)", 0.0, 10.0, 3.0, 0.5)
+    pausa = c2.number_input("Pausa entre empresas (seg)", 0.0, 30.0, 5.0, 0.5,
+                            help="Si Yahoo empieza a bloquear, la app alarga sola la pausa y frena la tanda a la 3.ª 'No confiable' seguida.")
     go = c3.button("Valuar la próxima tanda", type="primary")
 
     tickers = parse_tickers(txt)
@@ -352,6 +374,7 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
     if go and pending:
         batch = pending[: int(tanda)]
         bar = st.progress(0.0, text="Empezando…")
+        streak, stopped = 0, False
         for i, sym in enumerate(batch, start=1):
             bar.progress((i - 1) / len(batch), text=f"Valuando {sym} ({i}/{len(batch)})…")
             row, raw = evaluate(sym, load_fn)
@@ -360,13 +383,24 @@ def render(load_fn: Callable, stretch: dict, version: str) -> None:
                 raws[sym] = raw
             if rows:
                 table_slot.dataframe(pd.DataFrame(rows)[[c for c in COLUMNS if c in pd.DataFrame(rows).columns][:16]], **stretch)
-            if pausa and i < len(batch):
-                time.sleep(float(pausa))
+            streak = streak + 1 if row.get("Estado") in RESCUE_STATES else 0
+            if streak >= BAD_STREAK_STOP:
+                stopped = True
+                break
+            wait_s = pace(pausa, streak)
+            if wait_s and i < len(batch):
+                if streak:
+                    bar.progress(i / len(batch), text=f"Yahoo está limitando: pauso {wait_s:.0f} s antes de la próxima…")
+                time.sleep(wait_s)
         # v2.39: ya no se reintenta solo (con Yahoo limitando eran muchos minutos sin poder descargar nada):
         # primero aparece el Excel con lo hecho, y las "No confiables" se reintentan con el botón de más abajo.
         n_bad = sum(1 for r in rows if r.get("Estado") in RESCUE_STATES)
-        bar.progress(1.0, text="Tanda terminada")
+        bar.progress(1.0, text="Tanda frenada" if stopped else "Tanda terminada")
         pending = [t for t in tickers if t not in {str(r["Ticker"]) for r in rows}]
+        if stopped:
+            st.warning(f"Frené la tanda: {BAD_STREAK_STOP} empresas seguidas llegaron 'No confiables' porque Yahoo está limitando las consultas. "
+                       "Seguir insistiendo alarga el bloqueo. Esperá unos 5 minutos y apretá 'Reintentar las No confiables' (o 'Valuar la próxima tanda') "
+                       "con tandas de 5 y pausa de 10 s.")
         st.success(f"Tanda terminada. Pendientes: {len(pending)}."
                    + (" Apretá de nuevo para seguir." if pending else " ¡Lista completa! Descargá el Excel.")
                    + (f" {n_bad} empresa(s) llegaron con datos incompletos: podés descargar el Excel igual, o apretar "

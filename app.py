@@ -25,8 +25,8 @@ try:
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
-    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup_country", "data_yahoo.py": "profile_fallback", "profile_fallback.py": "def country_chain", "lote.py": "methods_map",
-               "methods_map.py": "def methods_map", "industry_multiples.py": "def get_multiples"}
+    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup_country", "data_yahoo.py": "profile_fallback", "profile_fallback.py": "def country_chain", "lote.py": "BAD_STREAK_STOP",
+               "methods_map.py": "def combine", "industry_multiples.py": "def get_multiples"}
 
     def _tiene(archivo, marca):
         try:
@@ -92,7 +92,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.53 · 20/10/2026"
+APP_VERSION = "v2.54 · 20/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):

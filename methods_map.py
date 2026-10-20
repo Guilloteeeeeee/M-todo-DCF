@@ -25,6 +25,12 @@ DORSEY_G_DEFAULT = 0.05    # Dorsey (Clorox): crecimiento constante prudente
 DORSEY_G_RANGE = (0.05, 0.07, 0.09)
 DORSEY_YEARS = 10
 
+# --- v2.54 · valor combinado (probado primero como columnas del lote)
+MULT_EXTREME = 35.0        # EV/EBITDA de la industria por encima de esto: los métodos 2 y 4 se excluyen solos (la mediana de las 91 industrias de Damodaran es ~13×)
+COINCIDE_TOL = 0.25        # "coinciden": ningún método incluido se aleja más de ±25 % del valor combinado
+COMB_MIN_METODOS = 2       # con menos de 2 métodos no hay combinado
+COMB_KEYS = ("m1", "m2", "m3", "m4")   # el 5 (circular) NUNCA entra: lleva el precio adentro
+
 KEYS = ("m1", "m2", "m3", "m4", "m5")
 NAMES = {
     "m1": "1. Nuestro DCF a 10 años",
@@ -63,6 +69,48 @@ def _irr(cfs: List[float]) -> Optional[float]:
     return (lo + hi) / 2
 
 
+def combine(items: List[dict], price: float, mult_ind: Optional[float] = None) -> Dict:
+    """Valor combinado: solo métodos que aplican, sin el circular, sin los que usan un múltiplo de industria extremo.
+    Mediana si quedan 3 o más, promedio si son 2. Marca 'coinciden' si ningún método se aleja más de ±25 % del combinado.
+    Devuelve dict(valor, ratio, regla, keys, excluidos {key: motivo}, lo, hi, lo_ratio, hi_ratio, coinciden, marca, desvio_max)."""
+    out = dict(valor=None, ratio=None, regla="", keys=[], excluidos={}, lo=None, hi=None, lo_ratio=None, hi_ratio=None,
+               coinciden=None, marca="", desvio_max=None)
+    vals = {}
+    for it in items:
+        k = it["key"]
+        if k not in COMB_KEYS:
+            if k == "m5":
+                out["excluidos"][k] = "circular (lleva el precio adentro)"
+            continue
+        v = it["valor"]
+        if v is None:
+            out["excluidos"][k] = "no aplica a esta empresa"
+        elif v <= 0:
+            out["excluidos"][k] = "valor cero o negativo"
+        elif k in ("m2", "m4") and mult_ind and mult_ind > MULT_EXTREME:
+            out["excluidos"][k] = f"múltiplo de industria extremo ({mult_ind:.1f}×)"
+        else:
+            vals[k] = v
+    n = len(vals)
+    if n < COMB_MIN_METODOS:
+        out["marca"] = "un solo método: no alcanza para combinar" if n == 1 else "ningún método aplicable"
+        out["keys"] = list(vals)
+        return out
+    xs = sorted(vals.values())
+    if n >= 3:
+        comb = xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+        out["regla"] = "mediana"
+    else:
+        comb = sum(xs) / n
+        out["regla"] = "promedio"
+    dev = max(abs(v / comb - 1) for v in xs)
+    out.update(valor=comb, ratio=(comb / price if price else None), keys=sorted(vals), lo=xs[0], hi=xs[-1],
+               lo_ratio=(xs[0] / price if price else None), hi_ratio=(xs[-1] / price if price else None),
+               desvio_max=dev, coinciden=dev <= COINCIDE_TOL)
+    out["marca"] = "coinciden" if out["coinciden"] else "no coinciden: no te fíes del promedio"
+    return out
+
+
 def _item(key, valor, price, nota="", rango=None, circular=False, extra=None):
     d = dict(key=key, nombre=NAMES[key], valor=valor, rango=rango, nota=nota, circular=circular,
              ratio=(valor / price if (valor is not None and price) else None),
@@ -75,7 +123,7 @@ def _item(key, valor, price, nota="", rango=None, circular=False, extra=None):
 def methods_map(co, res, model: str = "FCFF", dorsey_g: float = DORSEY_G_DEFAULT, dorsey_R: Optional[float] = None) -> Dict:
     """co: empresa YA con la industria cargada (idt.attach); res: resultado Base del modelo (ValResult); model: modelo usado.
     Devuelve {'applicable', 'reason', 'items': [...5 métodos...], 'panel': {...} o None, 'notas': [...], 'rango': (min, max) o None}."""
-    out = dict(applicable=False, reason="", items=[], panel=None, notas=[], rango=None)
+    out = dict(applicable=False, reason="", items=[], panel=None, notas=[], rango=None, combinado=None)
     if model != "FCFF":
         out["reason"] = "Solo se calcula para empresas valuadas por flujo libre (FCFF); este modelo es " + str(model) + "."
         return out
@@ -165,6 +213,7 @@ def methods_map(co, res, model: str = "FCFF", dorsey_g: float = DORSEY_G_DEFAULT
                        circular=True))
     out["items"] = items
     out["notas"] = notas
+    out["combinado"] = combine(items, price, mult_ind)
 
     vals = [it["valor"] for it in items if it["valor"] is not None and not it["circular"]]
     lows = [it["rango"][0] if it["rango"] else it["valor"] for it in items if it["valor"] is not None and not it["circular"]]
