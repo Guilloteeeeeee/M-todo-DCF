@@ -150,6 +150,12 @@ def test_columnas_del_mapa_de_metodos():
     wb = openpyxl.load_workbook(io.BytesIO(xl))
     hdr = [c.value for c in wb["Lote"][1]]
     assert "Método 3 ÷ precio" in hdr and "Múltiplo EV/EBIT requerido en 5a" in hdr
+    # v2.55: los dos números grandes
+    for k in ("Valor por DCF ÷ precio", "Valor por múltiplos ÷ precio", "Múltiplos: pesos usados", "DCF vs múltiplos", "DCF vs múltiplos: marca",
+              "Múltiplos: EV/EBITDA ÷ precio", "Múltiplos: P/E ÷ precio", "Múltiplos: EV/Ventas ÷ precio", "DCF: métodos"):
+        assert k in row and k in lote.COLUMNS and k in hdr, k
+        assert row[k] is not None or k == "Múltiplos: P/E ÷ precio", k
+    assert "DCF y múltiplos no coinciden" in lote.FLAG_HELP
     # v2.54: valor combinado
     for k in ("Valor combinado ÷ precio", "Combinado: regla", "Combinado: métodos", "Combinado: mín ÷ precio", "Combinado: máx ÷ precio", "Combinado: marca"):
         assert k in row and row[k] is not None, k

@@ -26,7 +26,7 @@ except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
     _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup_country", "data_yahoo.py": "profile_fallback", "profile_fallback.py": "def country_chain", "lote.py": "BAD_STREAK_STOP",
-               "methods_map.py": "def combine", "industry_multiples.py": "def get_multiples"}
+               "methods_map.py": "def dos_valores", "industry_multiples.py": "def get_pe_sales"}
 
     def _tiene(archivo, marca):
         try:
@@ -92,7 +92,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.54 · 20/10/2026"
+APP_VERSION = "v2.55 · 20/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):
@@ -642,6 +642,27 @@ elif base.ok:
         if not mp["applicable"]:
             st.info(mp["reason"])
         else:
+            _dv = mp.get("dos")
+            if _dv:                                                      # v2.55: los dos números grandes
+                _a, _m = _dv["dcf"], _dv["mult"]
+                _b1, _b2 = st.columns(2)
+                if _a["valor"]:
+                    _b1.metric("Valor por DCF (promedio de los métodos DCF)", money(_a["valor"], co.currency), f"{_a['ratio']:.2f}× el precio", delta_color="off")
+                    _b1.caption(f"Métodos {', '.join(k[1] for k in _a['keys'])} · rango {money(_a['lo'], '', 2)} – {money(_a['hi'], '', 2)}"
+                                + ("".join(f" · método {k[1]} fuera: {m}" for k, m in _a["excluidos"].items())))
+                else:
+                    _b1.metric("Valor por DCF", "n/d")
+                if _m["valor"]:
+                    _b2.metric("Valor por múltiplos (ponderado según el sector)", money(_m["valor"], co.currency), f"{_m['ratio']:.2f}× el precio", delta_color="off")
+                    _b2.caption(f"Pesos: {_m['pesos']} · rango {money(_m['lo'], '', 2)} – {money(_m['hi'], '', 2)}"
+                                + (f" · ⚠️ {_m['aviso']}" if _m.get("aviso") else ""))
+                else:
+                    _b2.metric("Valor por múltiplos", "n/d")
+                if _dv["coinciden"] is True:
+                    st.success("✅ Los dos valores **coinciden** (diferencia de hasta 25 %).")
+                elif _dv["coinciden"] is False:
+                    st.warning("⚠️ **No coinciden:** el DCF y los múltiplos cuentan historias distintas (diferencia de más de 25 %). No te quedes con uno solo; mirá por qué difieren.")
+                st.caption("Pesos de los múltiplos = propuesta de trabajo (a revisar). Si un múltiplo no se puede calcular (ganancia ≤ 0, múltiplo de industria extremo), su peso se reparte entre los demás.")
             _rows = []
             for it in mp["items"]:
                 if it["valor"] is None:
@@ -664,7 +685,7 @@ elif base.ok:
                 st.caption(f"Línea punteada: precio actual {money(co.price, co.currency)}. Gris: método circular (el valor sale cerca del precio por construcción).")
             if mp["rango"]:
                 st.markdown(f"**Rango de los métodos independientes (1 a 4):** {money(mp['rango'][0], co.currency)} – {money(mp['rango'][1], co.currency)} "
-                            f"contra un precio de {money(co.price, co.currency)}. No se promedian: cada uno responde una pregunta distinta y tres comparten la tasa de descuento.")
+                            f"contra un precio de {money(co.price, co.currency)}. Abajo, cada método por separado; arriba, los dos números grandes que los resumen.")
             pn = mp["panel"]
             if pn:
                 st.markdown("**Panel a 5 años: ¿qué valdría y qué rendimiento tendría comprar hoy?**")
@@ -985,7 +1006,7 @@ with t5:
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
   ingreses. Lo retenido se reinvierte a Ke + spread, de ahí sale el crecimiento. Se descuenta a Ke.
 
-**Mapa de métodos (v2.48).** Debajo del veredicto, cinco formas de mirar el valor; NINGUNA cambia el valor del modelo y no se promedian. (1) Nuestro DCF a 10 años. (2) El mismo DCF pero cortado en el año 5, con valor final igual al múltiplo EV/EBITDA de la industria (Damodaran, EE.UU.) por el EBITDA del año 5. (3) *Estilo Dorsey*: flujo de caja libre real de Yahoo (flujo operativo − inversión) que crece un % constante 10 años (5 % por defecto, como en su ejemplo de Clorox) y después una perpetuidad de 3 %; tasa de descuento: la mayor entre 9 % y el costo del capital propio del modelo (la podés cambiar). (4) El múltiplo EV/EBITDA de la industria por el EBITDA de la empresa. (5) *Estilo Alpha*: como el 2 pero con el múltiplo EV/EBIT que el mercado paga hoy por la empresa; es circular (el valor sale cerca del precio por construcción) y es una aproximación nuestra, no el número de Alpha Spread. El **panel a 5 años** muestra qué valdría la empresa en 5 años según el modelo, el retorno anual de comprar hoy, y el múltiplo que hace falta en 5 años para ganar el costo del capital. Límites: solo FCFF (no financieras ni REIT); los múltiplos de industria son de EE.UU. aunque la empresa sea de otro país; el método Dorsey puede salir muy bajo si el flujo de caja libre de los últimos 12 meses es transitoriamente chico; se supone que todo el flujo libre llega al accionista.
+**Mapa de métodos (v2.48).** Debajo del veredicto, cinco formas de mirar el valor; NINGUNA cambia el valor del modelo. Arriba van **dos números grandes (v2.55)**: el *valor por DCF* (promedio simple de los métodos 1, 2 y 3) y el *valor por múltiplos* (promedio ponderado de EV/EBITDA, P/E y EV/Ventas de la industria, con pesos propuestos según el sector o la industria; si un múltiplo no se puede calcular, su peso se reparte entre los otros). El método 5 (circular) no entra en ninguno, y si los dos números difieren más de 25 % la app avisa. (1) Nuestro DCF a 10 años. (2) El mismo DCF pero cortado en el año 5, con valor final igual al múltiplo EV/EBITDA de la industria (Damodaran, EE.UU.) por el EBITDA del año 5. (3) *Estilo Dorsey*: flujo de caja libre real de Yahoo (flujo operativo − inversión) que crece un % constante 10 años (5 % por defecto, como en su ejemplo de Clorox) y después una perpetuidad de 3 %; tasa de descuento: la mayor entre 9 % y el costo del capital propio del modelo (la podés cambiar). (4) El múltiplo EV/EBITDA de la industria por el EBITDA de la empresa. (5) *Estilo Alpha*: como el 2 pero con el múltiplo EV/EBIT que el mercado paga hoy por la empresa; es circular (el valor sale cerca del precio por construcción) y es una aproximación nuestra, no el número de Alpha Spread. El **panel a 5 años** muestra qué valdría la empresa en 5 años según el modelo, el retorno anual de comprar hoy, y el múltiplo que hace falta en 5 años para ganar el costo del capital. Límites: solo FCFF (no financieras ni REIT); los múltiplos de industria son de EE.UU. aunque la empresa sea de otro país; el método Dorsey puede salir muy bajo si el flujo de caja libre de los últimos 12 meses es transitoriamente chico; se supone que todo el flujo libre llega al accionista.
 
 **Industria de comparación (v2.43).** La app busca cada empresa en la planilla de Damodaran «Companies in each industry» (48.156 empresas, las mismas 94 industrias de sus tablas) por ticker, por sufijo de bolsa o por nombre, y usa su industria exacta; si la empresa no figura, usa la industria de Yahoo traducida con reglas propias. La clasificación de Damodaran es por código industrial (SIC) y a veces no es la intuitiva (Alphabet y Meta en *Software (Entertainment)*; Caterpillar en *Construction Supplies*). Excepción (v2.45): Visa, Mastercard, PayPal, procesadores de pagos, bolsas y proveedores de datos figuran en la planilla junto con los prestamistas; si se valúan por flujo libre y casi no tienen deuda (deuda ≤ 1,5 veces su capitalización), se comparan con *Business & Consumer Services* (donde Damodaran pone a Equifax, TransUnion y Verisk). Los prestamistas (AmEx, Capital One...) se valúan por retorno excedente y conservan su grupo. Se puede cambiar a mano en el selector.
 

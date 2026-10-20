@@ -146,6 +146,51 @@ def test_combinado_en_el_mapa():
     assert mm.methods_map(co, res, "FFE")["combinado"] is None
 
 
+def _cp(label, ratio, price=100.0):
+    return dict(label=label, valor=None if ratio is None else ratio * price, mult=10.0, metric=1.0, motivo="" if ratio else "no calculable")
+
+
+def test_dos_valores_pesos_y_reparto():
+    """v2.55: DCF = promedio de m1-m3; múltiplos = promedio ponderado; el peso de lo que no se calcula se reparte entre los demás."""
+    items = [_it("m1", 1.0), _it("m2", 1.2), _it("m3", 0.8), _it("m4", 0.9), _it("m5", 3.0)]
+    d = mm.dos_valores(items, [_cp("EV/EBITDA", 1.0), _cp("P/E", 0.5), _cp("EV/Ventas", 2.0)], (0.5, 0.4, 0.1), 100.0, 14.0)
+    assert abs(d["dcf"]["ratio"] - 1.0) < 1e-9 and d["dcf"]["keys"] == ["m1", "m2", "m3"]
+    assert abs(d["mult"]["ratio"] - (0.5 * 1.0 + 0.4 * 0.5 + 0.1 * 2.0)) < 1e-9
+    # sin P/E (empresa con pérdidas): 0,5 y 0,1 se reparten en 5/6 y 1/6
+    d = mm.dos_valores(items, [_cp("EV/EBITDA", 1.0), _cp("P/E", None), _cp("EV/Ventas", 2.0)], (0.5, 0.4, 0.1), 100.0, 14.0)
+    assert abs(d["mult"]["ratio"] - (5 / 6 * 1.0 + 1 / 6 * 2.0)) < 1e-9 and "P/E" not in d["mult"]["pesos"]
+    # solo EV/Ventas: avisa
+    d = mm.dos_valores(items, [_cp("EV/EBITDA", None), _cp("P/E", None), _cp("EV/Ventas", 2.0)], (0.5, 0.4, 0.1), 100.0, 14.0)
+    assert d["mult"]["ratio"] == 2.0 and "EV/Ventas" in d["mult"]["aviso"]
+    # múltiplo de salida extremo saca el método 2 del DCF; coincidencia entre los dos valores
+    d = mm.dos_valores(items, [_cp("EV/EBITDA", 1.0), _cp("P/E", 1.0), _cp("EV/Ventas", 1.0)], (0.5, 0.4, 0.1), 100.0, 47.8)
+    assert d["dcf"]["keys"] == ["m1", "m3"] and "extremo" in d["dcf"]["excluidos"]["m2"] and d["coinciden"] is True
+    d = mm.dos_valores(items, [_cp("EV/EBITDA", 2.0), _cp("P/E", 2.0), _cp("EV/Ventas", 2.0)], (0.5, 0.4, 0.1), 100.0, 14.0)
+    assert d["coinciden"] is False and d["brecha"] < 0 and d["marca"].startswith("no coinciden")
+    # nada calculable
+    d = mm.dos_valores(items, [_cp("EV/EBITDA", None), _cp("P/E", None), _cp("EV/Ventas", None)], (0.5, 0.4, 0.1), 100.0, 14.0)
+    assert d["mult"]["valor"] is None and d["marca"] == "falta uno de los dos valores"
+
+
+def test_pesos_por_sector_e_industria_y_tablas():
+    assert abs(sum(mm.SECTOR_WEIGHTS[k][i] for k in mm.SECTOR_WEIGHTS for i in range(3)) - len(mm.SECTOR_WEIGHTS)) < 1e-9
+    assert all(abs(sum(w) - 1) < 1e-9 for w in list(mm.SECTOR_WEIGHTS.values()) + list(mm.INDUSTRY_WEIGHTS.values()) + [mm.WEIGHTS_DEFAULT])
+    assert mm.multiple_weights("Technology", "Software (Internet)") == mm.INDUSTRY_WEIGHTS["Software (Internet)"]
+    assert mm.multiple_weights("Energy", "") == mm.SECTOR_WEIGHTS["Energy"] and mm.multiple_weights("Algo raro", "") == mm.WEIGHTS_DEFAULT
+    from industry_data import IND
+    from industry_multiples import PE_SALES, MULT, get_pe_sales
+    assert set(IND) <= set(PE_SALES) and all(PE_SALES[k][0] == MULT[k][0] for k in MULT)      # misma cantidad de empresas que la tabla de EV/EBITDA
+    assert get_pe_sales("Chemical (Specialty)") == dict(n=59, pe=23.18, pe_fwd=19.32, ev_sales=2.65) and get_pe_sales("xx") is None
+    assert all(k in IND for k in mm.INDUSTRY_WEIGHTS)
+
+
+def test_dos_valores_en_el_mapa():
+    co, res = _base()
+    d = mm.methods_map(co, res, "FCFF")["dos"]
+    assert d["dcf"]["ratio"] and d["mult"]["ratio"] and abs(sum(c["peso"] for c in d["mult"]["comps"]) - 1) < 1e-9
+    assert [c["label"] for c in d["mult"]["comps"]] == list(mm.MULT_LABELS)
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

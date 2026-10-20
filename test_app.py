@@ -46,17 +46,17 @@ def check(at, label):
     assert not at.exception, [e.value for e in at.exception]
     print(label, "| métricas:", [m.value for m in at.metric], "| errores:", [e.value[:60] for e in at.error])
 
-at = run("IND"); check(at, "IND"); assert len(at.metric) == 3
-at = run("BNK"); check(at, "BNK"); assert len(at.metric) == 3
-at = run("REI"); check(at, "REI"); assert len(at.metric) == 3
-at = run("FIN"); check(at, "FIN"); assert len(at.metric) == 3
+at = run("IND"); check(at, "IND"); assert len(at.metric) in (3, 5)
+at = run("BNK"); check(at, "BNK"); assert len(at.metric) in (3, 5)
+at = run("REI"); check(at, "REI"); assert len(at.metric) in (3, 5)
+at = run("FIN"); check(at, "FIN"); assert len(at.metric) in (3, 5)
 assert any("Resultado degradado" in e.value for e in at.error), "FIN no trae industria/país: debe mostrar el cartel rojo"
 assert not any("Resultado degradado" in e.value for e in run("IND").error), "IND está completo: no debe haber cartel"
-at = run("NOC"); check(at, "NOC"); assert len(at.metric) == 3
+at = run("NOC"); check(at, "NOC"); assert len(at.metric) in (3, 5)
 assert not any("Resultado degradado" in e.value for e in at.error), "falta solo el país: no debe ser rojo"
 assert any("Dato incompleto" in w.value and "país" in w.value for w in at.warning), "falta solo el país: cartel amarillo y preciso"
 assert any("industria" in e.value for e in run("FIN").error), "el cartel rojo nombra lo que falta"
-at = run("ADR"); check(at, "ADR"); assert len(at.metric) == 3
+at = run("ADR"); check(at, "ADR"); assert len(at.metric) in (3, 5)
 assert any("ADR" in e.value and "Resultado degradado" in e.value for e in at.error), "ADR sin capitalización: cartel rojo"
 at = run("IND"); assert any("Etapa:" in c.value for c in at.caption), "falta la etiqueta de etapa"
 at = run("IND"); check(at, "IND mapa")

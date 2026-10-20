@@ -59,6 +59,7 @@ FLAG_HELP = {
     "WACC extremo": "WACC menor a 6 % o mayor a 12 %.",
     "controles ⚠️": "Hay datos con controles en estado REVISAR.",
     "métodos no coinciden": "Los métodos que entran al valor combinado (1 a 4, sin el circular y sin los de múltiplo extremo) se alejan más de ±25 % del valor combinado: no te fíes del promedio.",
+    "DCF y múltiplos no coinciden": "Los dos números grandes (valor por DCF y valor por múltiplos) difieren más de 25 % entre sí: el mercado y los flujos cuentan historias distintas.",
     "precio sobre todos los métodos": "El precio está por encima del valor de TODOS los métodos independientes (1 a 4): nuestro DCF, el DCF a 5 años con múltiplo de la industria, Dorsey y los múltiplos de la industria. Solo el método circular (5) se le acerca.",
     "precio bajo todos los métodos": "El precio está por debajo del valor de TODOS los métodos independientes (1 a 4).",
 }
@@ -208,6 +209,20 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
                                     "Combinado: excluidos": "; ".join(f"{k[1]}: {m}" for k, m in cb["excluidos"].items() if k != "m5")})
                         if cb["coinciden"] is False:
                             row["Banderas"] = (row.get("Banderas", "") + " · " if row.get("Banderas") else "") + "métodos no coinciden"
+                    dv = mp.get("dos")
+                    if dv:
+                        a, m = dv["dcf"], dv["mult"]
+                        cm = {c["label"]: c for c in m["comps"]}
+                        row.update({"Valor por DCF ÷ precio": _f(a["ratio"]), "DCF: métodos": ",".join(k[1] for k in a["keys"]),
+                                    "DCF: mín ÷ precio": _f(a["lo_ratio"]), "DCF: máx ÷ precio": _f(a["hi_ratio"]),
+                                    "Valor por múltiplos ÷ precio": _f(m["ratio"]), "Múltiplos: pesos usados": m["pesos"],
+                                    "Múltiplos: EV/EBITDA ÷ precio": _f(cm["EV/EBITDA"]["ratio"]), "Múltiplos: P/E ÷ precio": _f(cm["P/E"]["ratio"]),
+                                    "Múltiplos: EV/Ventas ÷ precio": _f(cm["EV/Ventas"]["ratio"]),
+                                    "Múltiplos: mín ÷ precio": _f(m["lo_ratio"]), "Múltiplos: máx ÷ precio": _f(m["hi_ratio"]),
+                                    "DCF vs múltiplos": _f(dv["brecha"]), "DCF vs múltiplos: marca": dv["marca"],
+                                    "Múltiplos: aviso": m.get("aviso", "")})
+                        if dv["coinciden"] is False:
+                            row["Banderas"] = (row.get("Banderas", "") + " · " if row.get("Banderas") else "") + "DCF y múltiplos no coinciden"
                     pn = mp["panel"]
                     if pn:
                         row.update({"Retorno anual 5a (múltiplo de hoy)": _f(pn["retorno_mult_hoy"]), "Múltiplo EV/EBIT hoy": _f(pn["mult_hoy"]),
@@ -283,6 +298,7 @@ COLUMNS = ["Ticker", "Empresa", "Estado", "Modelo", "Sector", "Industria", "Paí
            "Margen TTM", "Margen objetivo", "TTM − objetivo (pp)", "Criterio de margen", "ROIC inicial", "ROIC terminal",
            "Foso", "Origen foso", "Etapa", "P(quiebra 10a)", "I+D capitalizado (M)", "VT / EV", "EV/EBIT salida", "Pensiones (M)", "Pensiones / patrimonio", "WACC implícito (precio)", "WACC modelo − implícito (pp)",
            "Método 2 ÷ precio", "Método 3 ÷ precio", "Método 4 ÷ precio", "Método 5 (circular) ÷ precio", "Métodos 1-4: mín ÷ precio", "Métodos 1-4: máx ÷ precio",
+           "Valor por DCF ÷ precio", "DCF: métodos", "DCF: mín ÷ precio", "DCF: máx ÷ precio", "Valor por múltiplos ÷ precio", "Múltiplos: pesos usados", "Múltiplos: EV/EBITDA ÷ precio", "Múltiplos: P/E ÷ precio", "Múltiplos: EV/Ventas ÷ precio", "Múltiplos: mín ÷ precio", "Múltiplos: máx ÷ precio", "DCF vs múltiplos", "DCF vs múltiplos: marca", "Múltiplos: aviso",
            "Valor combinado ÷ precio", "Combinado: regla", "Combinado: métodos", "Combinado: mín ÷ precio", "Combinado: máx ÷ precio", "Combinado: desvío máx", "Combinado: marca", "Combinado: excluidos",
            "Retorno anual 5a (múltiplo de hoy)", "Múltiplo EV/EBIT hoy", "Múltiplo EV/EBIT requerido en 5a", "FCF real TTM (M)", "Avisos (n)", "Controles ⚠️ (n)",
            "Datos faltantes", "Banderas", "Primer aviso", "Detalle", "Segundos"]
@@ -321,6 +337,9 @@ def build_excel(rows: List[dict], raws: Dict[str, str]) -> bytes:
                    "Pensiones / patrimonio": "0%", "WACC implícito (precio)": "0.00%", "WACC modelo − implícito (pp)": "0.00",
                    "Método 2 ÷ precio": "0.00", "Método 3 ÷ precio": "0.00", "Método 4 ÷ precio": "0.00", "Método 5 (circular) ÷ precio": "0.00",
                    "Métodos 1-4: mín ÷ precio": "0.00", "Métodos 1-4: máx ÷ precio": "0.00",
+                   "Valor por DCF ÷ precio": "0.00", "DCF: mín ÷ precio": "0.00", "DCF: máx ÷ precio": "0.00", "Valor por múltiplos ÷ precio": "0.00",
+                   "Múltiplos: EV/EBITDA ÷ precio": "0.00", "Múltiplos: P/E ÷ precio": "0.00", "Múltiplos: EV/Ventas ÷ precio": "0.00",
+                   "Múltiplos: mín ÷ precio": "0.00", "Múltiplos: máx ÷ precio": "0.00", "DCF vs múltiplos": "+0%;-0%",
                    "Valor combinado ÷ precio": "0.00", "Combinado: mín ÷ precio": "0.00", "Combinado: máx ÷ precio": "0.00", "Combinado: desvío máx": "0%", "Retorno anual 5a (múltiplo de hoy)": "0.0%",
                    "Múltiplo EV/EBIT hoy": "0.0", "Múltiplo EV/EBIT requerido en 5a": "0.0"}
             for i, col in enumerate(df.columns, start=1):

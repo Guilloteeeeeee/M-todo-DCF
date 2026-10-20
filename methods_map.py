@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from industry_multiples import MULT_DATE, MULT_MIN_MUESTRA, get_multiples
+from industry_multiples import MULT_DATE, MULT_MIN_MUESTRA, get_multiples, get_pe_sales
 
 DORSEY_R_MIN = 0.09        # tasa de descuento de Dorsey para una empresa estable y sólida (Clorox); si el costo del capital propio del modelo es mayor, se usa ese
 DORSEY_G_TERMINAL = 0.03   # Dorsey: ~ crecimiento del PBI de EE.UU.
@@ -29,6 +29,27 @@ DORSEY_YEARS = 10
 MULT_EXTREME = 35.0        # EV/EBITDA de la industria por encima de esto: los métodos 2 y 4 se excluyen solos (la mediana de las 91 industrias de Damodaran es ~13×)
 COINCIDE_TOL = 0.25        # "coinciden": ningún método incluido se aleja más de ±25 % del valor combinado
 COMB_MIN_METODOS = 2       # con menos de 2 métodos no hay combinado
+
+# --- v2.55 · «dos números grandes»: valor por DCF (promedio de métodos DCF) y valor por múltiplos (2-3 múltiplos con peso según sector / industria)
+DCF_KEYS = ("m1", "m2", "m3")
+PE_EXTREME = 60.0          # P/E de la industria por encima de esto se excluye solo (hoy solo Auto & Truck, 119,6×)
+# Pesos PROPUESTOS (a revisar): (EV/EBITDA, P/E, EV/Ventas). Criterio (Damodaran, tablas 4.3-4.4): EV/EBITDA es el más parejo entre empresas con distinta deuda y
+# necesidad de inversión; P/E sirve donde la ganancia es estable y positiva; EV/Ventas es el más flojo (ignora márgenes), por eso pesa poco salvo donde la ganancia aún no madura.
+SECTOR_WEIGHTS = {
+    "Technology": (0.40, 0.40, 0.20), "Communication Services": (0.50, 0.30, 0.20), "Healthcare": (0.30, 0.50, 0.20),
+    "Consumer Defensive": (0.40, 0.50, 0.10), "Consumer Cyclical": (0.50, 0.40, 0.10), "Industrials": (0.50, 0.40, 0.10),
+    "Basic Materials": (0.60, 0.30, 0.10), "Energy": (0.60, 0.30, 0.10), "Utilities": (0.40, 0.50, 0.10),
+}
+WEIGHTS_DEFAULT = (0.50, 0.40, 0.10)
+INDUSTRY_WEIGHTS = {     # la industria manda sobre el sector
+    "Software (Internet)": (0.30, 0.35, 0.35), "Software (System & Application)": (0.35, 0.35, 0.30), "Software (Entertainment)": (0.35, 0.35, 0.30),
+    "Drugs (Biotechnology)": (0.20, 0.30, 0.50),
+    "Oil/Gas (Production and Exploration)": (0.70, 0.20, 0.10), "Oil/Gas (Integrated)": (0.70, 0.20, 0.10), "Metals & Mining": (0.70, 0.20, 0.10),
+    "Steel": (0.70, 0.20, 0.10), "Chemical (Basic)": (0.70, 0.20, 0.10), "Coal & Related Energy": (0.70, 0.20, 0.10),
+}
+MULT_LABELS = ("EV/EBITDA", "P/E", "EV/Ventas")
+DOS_TOL = 0.25
+VENTAS_PESO_AVISO = 0.40   # si, tras repartir los pesos, EV/Ventas pesa 40 % o más en el valor por múltiplos, se avisa
 COMB_KEYS = ("m1", "m2", "m3", "m4")   # el 5 (circular) NUNCA entra: lleva el precio adentro
 
 KEYS = ("m1", "m2", "m3", "m4", "m5")
@@ -111,6 +132,66 @@ def combine(items: List[dict], price: float, mult_ind: Optional[float] = None) -
     return out
 
 
+def multiple_weights(sector: str, ind_name: str) -> tuple:
+    """(peso EV/EBITDA, peso P/E, peso EV/Ventas) para esa industria (si está) o ese sector."""
+    return INDUSTRY_WEIGHTS.get(ind_name or "") or SECTOR_WEIGHTS.get(sector or "") or WEIGHTS_DEFAULT
+
+
+def _range_fields(vals: List[float], price: float) -> dict:
+    lo, hi = min(vals), max(vals)
+    return dict(lo=lo, hi=hi, lo_ratio=(lo / price if price else None), hi_ratio=(hi / price if price else None))
+
+
+def dos_valores(items: List[dict], comps: List[dict], weights: tuple, price: float, mult_ind: Optional[float], n_ind: Optional[int] = None) -> Dict:
+    """Los «dos números grandes».
+    DCF = promedio simple de los métodos DCF que aplican (1, 2 y 3). El 2 sale si el múltiplo de industria es extremo.
+    Múltiplos = promedio ponderado de EV/EBITDA, P/E y EV/Ventas; si un múltiplo no se puede calcular (ganancia o EBITDA ≤ 0, dato que falta, múltiplo extremo),
+    su peso se reparte entre los que quedan, en proporción a sus pesos. comps: [{'label','valor','mult','metric','motivo'}] en el orden (EV/EBITDA, P/E, EV/Ventas)."""
+    dcf = dict(valor=None, ratio=None, keys=[], excluidos={}, lo=None, hi=None, lo_ratio=None, hi_ratio=None)
+    vals = {}
+    for it in items:
+        if it["key"] not in DCF_KEYS:
+            continue
+        v, k = it["valor"], it["key"]
+        if v is None:
+            dcf["excluidos"][k] = "no aplica a esta empresa"
+        elif v <= 0:
+            dcf["excluidos"][k] = "valor cero o negativo"
+        elif k == "m2" and mult_ind and mult_ind > MULT_EXTREME:
+            dcf["excluidos"][k] = f"múltiplo de salida extremo ({mult_ind:.1f}×)"
+        else:
+            vals[k] = v
+    if vals:
+        avg = sum(vals.values()) / len(vals)
+        dcf.update(valor=avg, ratio=(avg / price if price else None), keys=sorted(vals), **_range_fields(list(vals.values()), price))
+    mu = dict(valor=None, ratio=None, comps=[], pesos="", lo=None, hi=None, lo_ratio=None, hi_ratio=None)
+    ok = [c for c in comps if c["valor"] is not None and c["valor"] > 0]
+    wsum = sum(weights[i] for i, c in enumerate(comps) if c["valor"] is not None and c["valor"] > 0)
+    for i, c in enumerate(comps):
+        used = (weights[i] / wsum) if (c["valor"] is not None and c["valor"] > 0 and wsum > 0) else 0.0
+        mu["comps"].append(dict(c, peso_base=weights[i], peso=used, ratio=(c["valor"] / price if (c["valor"] and price) else None)))
+    if ok and wsum > 0:
+        val = sum(c["peso"] * c["valor"] for c in mu["comps"] if c["peso"] > 0)
+        mu.update(valor=val, ratio=(val / price if price else None), **_range_fields([c["valor"] for c in ok], price))
+        mu["pesos"] = " · ".join(f"{c['label']} {c['peso']:.0%}" for c in mu["comps"] if c["peso"] > 0)
+    avisos = []
+    es_peso = next((c["peso"] for c in mu["comps"] if c["label"] == "EV/Ventas"), 0.0)
+    if mu["valor"] and es_peso >= VENTAS_PESO_AVISO:
+        avisos.append(f"se apoya {es_peso:.0%} en EV/Ventas (ignora márgenes): poco confiable")
+    if n_ind is not None and n_ind < MULT_MIN_MUESTRA:
+        avisos.append(f"muestra chica de la industria ({n_ind} empresas)")
+    mu["aviso"] = "; ".join(avisos)
+    out = dict(dcf=dcf, mult=mu, brecha=None, coinciden=None, marca="")
+    if dcf["valor"] and mu["valor"]:
+        out["brecha"] = dcf["valor"] / mu["valor"] - 1
+        d = abs(dcf["valor"] - mu["valor"]) / ((dcf["valor"] + mu["valor"]) / 2)
+        out["coinciden"] = d <= DOS_TOL
+        out["marca"] = "coinciden" if out["coinciden"] else "no coinciden: el DCF y los múltiplos cuentan historias distintas"
+    else:
+        out["marca"] = "falta uno de los dos valores"
+    return out
+
+
 def _item(key, valor, price, nota="", rango=None, circular=False, extra=None):
     d = dict(key=key, nombre=NAMES[key], valor=valor, rango=rango, nota=nota, circular=circular,
              ratio=(valor / price if (valor is not None and price) else None),
@@ -123,7 +204,7 @@ def _item(key, valor, price, nota="", rango=None, circular=False, extra=None):
 def methods_map(co, res, model: str = "FCFF", dorsey_g: float = DORSEY_G_DEFAULT, dorsey_R: Optional[float] = None) -> Dict:
     """co: empresa YA con la industria cargada (idt.attach); res: resultado Base del modelo (ValResult); model: modelo usado.
     Devuelve {'applicable', 'reason', 'items': [...5 métodos...], 'panel': {...} o None, 'notas': [...], 'rango': (min, max) o None}."""
-    out = dict(applicable=False, reason="", items=[], panel=None, notas=[], rango=None, combinado=None)
+    out = dict(applicable=False, reason="", items=[], panel=None, notas=[], rango=None, combinado=None, dos=None)
     if model != "FCFF":
         out["reason"] = "Solo se calcula para empresas valuadas por flujo libre (FCFF); este modelo es " + str(model) + "."
         return out
@@ -214,6 +295,34 @@ def methods_map(co, res, model: str = "FCFF", dorsey_g: float = DORSEY_G_DEFAULT
     out["items"] = items
     out["notas"] = notas
     out["combinado"] = combine(items, price, mult_ind)
+
+    # --- v2.55 · valor por múltiplos: EV/EBITDA (el método 4), P/E y EV/Ventas de la industria
+    ps = get_pe_sales(co.ind_name)
+    v4_ok = items[3]["valor"] if (items[3]["valor"] and not (mult_ind and mult_ind > MULT_EXTREME)) else None
+    c_eb = dict(label="EV/EBITDA", valor=v4_ok, mult=mult_ind, metric=metric_ttm,
+                motivo=("" if v4_ok else ("múltiplo extremo" if (mult_ind and mult_ind > MULT_EXTREME) else "sin múltiplo o EBITDA ≤ 0")))
+    pe_v = pe_m = None
+    pe_why = ""
+    if not ps or not ps["pe"]:
+        pe_why = "sin P/E de la industria"
+    elif ps["pe"] > PE_EXTREME:
+        pe_why = f"múltiplo extremo ({ps['pe']:.0f}×)"
+    elif not co.ni_ttm or co.ni_ttm <= 0:
+        pe_why = "ganancia neta ≤ 0"
+    else:
+        pe_m = ps["pe"]
+        pe_v = pe_m * co.ni_ttm / sh
+    c_pe = dict(label="P/E", valor=pe_v, mult=(ps["pe"] if ps else None), metric=co.ni_ttm, motivo=pe_why)
+    es_v = None
+    es_why = ""
+    if not ps or not ps["ev_sales"]:
+        es_why = "sin EV/Ventas de la industria"
+    elif not co.revenue_ttm or co.revenue_ttm <= 0:
+        es_why = "sin ventas"
+    else:
+        es_v = (ps["ev_sales"] * co.revenue_ttm + bridge) / sh
+    c_es = dict(label="EV/Ventas", valor=es_v, mult=(ps["ev_sales"] if ps else None), metric=co.revenue_ttm, motivo=es_why)
+    out["dos"] = dos_valores(items, [c_eb, c_pe, c_es], multiple_weights(co.sector, co.ind_name), price, mult_ind, (ps or {}).get("n"))
 
     vals = [it["valor"] for it in items if it["valor"] is not None and not it["circular"]]
     lows = [it["rango"][0] if it["rango"] else it["valor"] for it in items if it["valor"] is not None and not it["circular"]]
