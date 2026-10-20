@@ -22,6 +22,7 @@ import pandas as pd
 from dcf_models import CompanyData
 import profile_fallback            # v2.50: respaldos de país / ADR (si falta el archivo, la app lo avisa al arrancar)
 
+ANALYST_GROWTH_MAX = 1.0           # v2.53: crecimiento de ingresos de analistas mayor a 100 % se descarta (dato roto de Yahoo)
 PROFILE_FALLBACK = True            # marca para que app.py detecte un data_yahoo.py viejo
 
 RF_FALLBACK = 0.052   # último recurso (bono 10 años EE.UU. ~5,22 % al 08/10/2026, FRED); se usa solo si fallan todas las fuentes en vivo
@@ -409,6 +410,16 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
 
     g0, g1 = analyst_growth(trend)
     rng = analyst_ranges(trend)
+    if g0 is not None and g0 > ANALYST_GROWTH_MAX:     # crecimiento de ingresos de más de 100 %: dato roto de Yahoo (ej.: TM +195 %)
+        warns.append(f"⚠️ Yahoo informó un crecimiento de ingresos esperado de {g0:.0%} para el año en curso (más de {ANALYST_GROWTH_MAX:.0%}): "
+                     "se DESCARTÓ por parecer un dato roto y se usa solo el del año siguiente (o la historia si tampoco hay).")
+        g0 = None
+        rng.pop("gl_y0", None); rng.pop("gh_y0", None)
+    if g1 is not None and g1 > ANALYST_GROWTH_MAX:
+        warns.append(f"⚠️ Yahoo informó un crecimiento de ingresos esperado de {g1:.0%} para el año siguiente (más de {ANALYST_GROWTH_MAX:.0%}): "
+                     "se DESCARTÓ por parecer un dato roto.")
+        g1 = None
+        rng.pop("gl_y1", None); rng.pop("gh_y1", None)
 
     co = CompanyData(
         ticker=sym.upper(),

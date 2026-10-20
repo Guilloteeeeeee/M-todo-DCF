@@ -92,7 +92,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.52 · 20/10/2026"
+APP_VERSION = "v2.53 · 20/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):

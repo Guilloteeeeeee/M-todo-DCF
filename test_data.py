@@ -287,6 +287,27 @@ def test_adr_ratio_ignored_when_same_currency():
     assert abs(co.shares_m - 200.0) < 1e-9, co.shares_m      # NO dividido por 5
     assert any("IGNORADO" in x for x in w)
 
+def test_crecimiento_de_analistas_mayor_a_100_se_descarta():
+    """Caso real TM: Yahoo dio +195 % para el año en curso (dato roto) y +3,1 % para el siguiente. Se descarta el primero; PLTR (+84 %) se conserva."""
+    from dcf_models import growth_anchors, Scen
+    dfa, dfq = frames()
+    tr = {"trend": [{"period": "0y", "revenueEstimate": {"growth": 1.9557, "yearAgoRevenue": 100.0, "low": 287.0, "high": 301.0}},
+                    {"period": "+1y", "revenueEstimate": {"growth": 0.0313, "yearAgoRevenue": 295.0, "low": 300.0, "high": 310.0}}]}
+    co, w = build_company("ABC", price, {"beta": 1.1}, {"sharesOutstanding": 200e6}, prof,
+                          {"financialCurrency": "EUR"}, tr, dfa, dfq, fx)
+    assert co.rev_g_y0 is None and abs(co.rev_g_y1 - 0.0313) < 1e-9 and co.rev_gl_y0 is None and co.rev_gh_y0 is None
+    assert any("DESCARTÓ" in x for x in w), w
+    g1, g2, src = growth_anchors(co, Params(), Scen("Base"))
+    assert abs(g1 - 0.0313) < 1e-9 and abs(g2 - 0.0313) < 1e-9 and src == "analistas"
+    tr2 = {"trend": [{"period": "0y", "revenueEstimate": {"growth": 0.8356}}, {"period": "+1y", "revenueEstimate": {"growth": 0.5012}}]}
+    co2, w2 = build_company("ABC", price, {"beta": 1.1}, {"sharesOutstanding": 200e6}, prof, {"financialCurrency": "EUR"}, tr2, dfa, dfq, fx)
+    assert abs(co2.rev_g_y0 - 0.8356) < 1e-9 and not any("DESCARTÓ" in x for x in w2)
+    tr3 = {"trend": [{"period": "0y", "revenueEstimate": {"growth": 2.5}}, {"period": "+1y", "revenueEstimate": {"growth": 1.5}}]}   # los dos rotos -> historia
+    co3, _ = build_company("ABC", price, {"beta": 1.1}, {"sharesOutstanding": 200e6}, prof, {"financialCurrency": "EUR"}, tr3, dfa, dfq, fx)
+    assert co3.rev_g_y0 is None and co3.rev_g_y1 is None
+    assert growth_anchors(co3, Params(), Scen("Base"))[2].startswith("hist")
+
+
 def test_analyst_ranges_parse():
     from data_yahoo import analyst_ranges
     trend = {"trend": [

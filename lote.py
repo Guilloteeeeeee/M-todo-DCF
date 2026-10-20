@@ -29,10 +29,10 @@ NO_APLICA_PCT = 0.02          # base < 2 % del precio -> "No aplica por DCF"
 SUGGESTED = (
     "AAPL, MSFT, NVDA, ORCL, INTC, CSCO, AMD, ADBE, "                 # tecnología
     "GOOGL, META, NFLX, DIS, VZ, T, "                                   # comunicaciones
-    "AMZN, TSLA, HD, MCD, NKE, F, RIVN, "                               # consumo discrecional
+    "AMZN, TSLA, HD, MCD, NKE, F, GM, RIVN, "                           # consumo discrecional
     "KO, PEP, PG, WMT, COST, PM, "                                      # consumo defensivo
     "JNJ, MRK, PFE, UNH, LLY, ABBV, MRNA, "                             # salud
-    "CAT, BA, UPS, GE, DAL, AAL, LMT, "                                 # industriales
+    "CAT, DE, PCAR, BA, UPS, GE, DAL, AAL, LMT, "                       # industriales
     "XOM, CVX, COP, FCX, NUE, LIN, "                                    # energía y materiales
     "NEE, DUK, SO, O, PLD, AMT, "                                       # utilities y REITs
     "JPM, BAC, GS, V, MA, MET, "                                        # financieras
