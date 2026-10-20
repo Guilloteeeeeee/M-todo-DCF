@@ -29,7 +29,7 @@ def load_company(sym, allow_annual=False, adr_ratio=None, fin_cur_mode="auto"):
     if sym == "NEG": return industrial(ebit_ttm=-10.0, ebit_hist=[-30.0, -25.0, -20.0, -10.0]), []
     if sym == "ADR": return industrial(ticker="ADR", country="Taiwan", cap_estimated=True), []
     if sym == "NOC": return industrial(ticker="NOC", country=""), []          # falta solo el país
-    return industrial(ticker=sym), []
+    return industrial(ticker=sym, fcf_ttm=900.0), []
 fake.load_company = load_company
 sys.modules["data_yahoo"] = fake
 
@@ -58,6 +58,13 @@ assert any("industria" in e.value for e in run("FIN").error), "el cartel rojo no
 at = run("ADR"); check(at, "ADR"); assert len(at.metric) == 3
 assert any("ADR" in e.value and "Resultado degradado" in e.value for e in at.error), "ADR sin capitalización: cartel rojo"
 at = run("IND"); assert any("Etapa:" in c.value for c in at.caption), "falta la etiqueta de etapa"
+at = run("IND"); check(at, "IND mapa")
+assert any("Mapa de métodos" in str(e.label) for e in at.expander), "falta el mapa de métodos"
+_idx = [str(i) for d in at.dataframe for i in d.value.index]
+assert any(i.startswith("1. Nuestro DCF") for i in _idx) and any(i.startswith("5. Estilo Alpha") for i in _idx), _idx
+assert any("Múltiplo que hace falta en 5 años" in m.value for m in at.markdown), "falta el panel a 5 años"
+at = run("BNK"); check(at, "BNK mapa")
+assert any("Mapa de métodos" in c.value and "solo se calcula" in c.value for c in at.caption), "financieras: aviso de que no aplica"
 at = run("NEG"); check(at, "NEG"); assert at.error and not at.metric
 at = run("BAD"); check(at, "BAD"); assert at.error
 # cambio de modelo manual y de moat

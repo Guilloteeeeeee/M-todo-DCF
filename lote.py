@@ -21,6 +21,7 @@ from country_risk import country_crp
 from country_tax import marginal_tax_for
 from dcf_models import Params, data_checks, field_checks, implied_wacc, route_model, run_scenarios, terminal_growth_default
 from industry_data import attach as attach_industry, ERP_DAMODARAN
+from methods_map import methods_map as build_methods_map
 
 SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
 NO_APLICA_PCT = 0.02          # base < 2 % del precio -> "No aplica por DCF"
@@ -57,6 +58,8 @@ FLAG_HELP = {
     "ROIC normalizado": "El ROIC inicial normalizado difiere más de 3 pp del ROIC con el TTM.",
     "WACC extremo": "WACC menor a 6 % o mayor a 12 %.",
     "controles ⚠️": "Hay datos con controles en estado REVISAR.",
+    "precio sobre todos los métodos": "El precio está por encima del valor de TODOS los métodos independientes (1 a 4): nuestro DCF, el DCF a 5 años con múltiplo de la industria, Dorsey y los múltiplos de la industria. Solo el método circular (5) se le acerca.",
+    "precio bajo todos los métodos": "El precio está por debajo del valor de TODOS los métodos independientes (1 a 4).",
 }
 
 
@@ -180,6 +183,27 @@ def evaluate(sym: str, load_fn: Callable, adr_ratio: float = 0.0) -> Tuple[dict,
             _imp = None
         row["WACC implícito (precio)"] = _imp["wacc"] if _imp else None
         row["WACC modelo − implícito (pp)"] = (_imp["wacc_model"] - _imp["wacc"]) * 100 if _imp else None
+        if estado in ("OK", "Datos incompletos") and model == "FCFF":      # v2.48: mapa de métodos (informativo, no cambia el valor)
+            try:
+                mp = build_methods_map(co2, base, model)
+                if mp["applicable"]:
+                    byk = {it["key"]: it for it in mp["items"]}
+                    row.update({"Método 2 ÷ precio": _f(byk["m2"]["ratio"]), "Método 3 ÷ precio": _f(byk["m3"]["ratio"]),
+                                "Método 4 ÷ precio": _f(byk["m4"]["ratio"]), "Método 5 (circular) ÷ precio": _f(byk["m5"]["ratio"]),
+                                "FCF real TTM (M)": _f(co2.fcf_ttm)})
+                    if mp["rango"] and co2.price:
+                        lo, hi = mp["rango"][0] / co2.price, mp["rango"][1] / co2.price
+                        row["Métodos 1-4: mín ÷ precio"], row["Métodos 1-4: máx ÷ precio"] = lo, hi
+                        if hi < 1.0:
+                            row["Banderas"] = (row.get("Banderas", "") + " · " if row.get("Banderas") else "") + "precio sobre todos los métodos"
+                        elif lo > 1.0:
+                            row["Banderas"] = (row.get("Banderas", "") + " · " if row.get("Banderas") else "") + "precio bajo todos los métodos"
+                    pn = mp["panel"]
+                    if pn:
+                        row.update({"Retorno anual 5a (múltiplo de hoy)": _f(pn["retorno_mult_hoy"]), "Múltiplo EV/EBIT hoy": _f(pn["mult_hoy"]),
+                                    "Múltiplo EV/EBIT requerido en 5a": _f(pn["mult_requerido"])})
+            except Exception:  # noqa: BLE001
+                pass                                                         # el mapa es informativo: si falla, la fila sigue igual
         if estado in ("No confiable", "No aplica por DCF"):
             ref = "/".join("n/d" if v is None else f"{v:.2f}" for v in (vp, vb, vo))
             row.update({"Valor ref. pes/base/opt": ref, "Pesimista": None, "Base": None, "Optimista": None,
@@ -238,7 +262,9 @@ COLUMNS = ["Ticker", "Empresa", "Estado", "Modelo", "Sector", "Industria", "Paí
            "Pesimista", "Base", "Optimista", "Valor ref. pes/base/opt", "Pes/Base", "Opt/Base", "Base vs precio",
            "WACC", "WACC terminal", "Ke", "g terminal aplicado", "Crecim. año 1", "Fuente crecim.",
            "Margen TTM", "Margen objetivo", "TTM − objetivo (pp)", "Criterio de margen", "ROIC inicial", "ROIC terminal",
-           "Foso", "Origen foso", "Etapa", "P(quiebra 10a)", "I+D capitalizado (M)", "VT / EV", "EV/EBIT salida", "Pensiones (M)", "Pensiones / patrimonio", "WACC implícito (precio)", "WACC modelo − implícito (pp)", "Avisos (n)", "Controles ⚠️ (n)",
+           "Foso", "Origen foso", "Etapa", "P(quiebra 10a)", "I+D capitalizado (M)", "VT / EV", "EV/EBIT salida", "Pensiones (M)", "Pensiones / patrimonio", "WACC implícito (precio)", "WACC modelo − implícito (pp)",
+           "Método 2 ÷ precio", "Método 3 ÷ precio", "Método 4 ÷ precio", "Método 5 (circular) ÷ precio", "Métodos 1-4: mín ÷ precio", "Métodos 1-4: máx ÷ precio",
+           "Retorno anual 5a (múltiplo de hoy)", "Múltiplo EV/EBIT hoy", "Múltiplo EV/EBIT requerido en 5a", "FCF real TTM (M)", "Avisos (n)", "Controles ⚠️ (n)",
            "Datos faltantes", "Banderas", "Primer aviso", "Detalle", "Segundos"]
 
 
@@ -272,7 +298,10 @@ def build_excel(rows: List[dict], raws: Dict[str, str]) -> bytes:
             pct = {"Pes/Base": "0.00", "Opt/Base": "0.00", "Base vs precio": "0%", "WACC": "0.00%", "WACC terminal": "0.00%", "Ke": "0.00%",
                    "g terminal aplicado": "0.00%", "Crecim. año 1": "0.0%", "Margen TTM": "0.0%", "Margen objetivo": "0.0%",
                    "ROIC inicial": "0.0%", "ROIC terminal": "0.0%", "VT / EV": "0%", "P(quiebra 10a)": "0%", "Pesimista": "0.00", "Base": "0.00", "Optimista": "0.00",
-                   "Pensiones / patrimonio": "0%", "WACC implícito (precio)": "0.00%", "WACC modelo − implícito (pp)": "0.00"}
+                   "Pensiones / patrimonio": "0%", "WACC implícito (precio)": "0.00%", "WACC modelo − implícito (pp)": "0.00",
+                   "Método 2 ÷ precio": "0.00", "Método 3 ÷ precio": "0.00", "Método 4 ÷ precio": "0.00", "Método 5 (circular) ÷ precio": "0.00",
+                   "Métodos 1-4: mín ÷ precio": "0.00", "Métodos 1-4: máx ÷ precio": "0.00", "Retorno anual 5a (múltiplo de hoy)": "0.0%",
+                   "Múltiplo EV/EBIT hoy": "0.0", "Múltiplo EV/EBIT requerido en 5a": "0.0"}
             for i, col in enumerate(df.columns, start=1):
                 if col in pct:
                     for r in range(2, ws.max_row + 1):

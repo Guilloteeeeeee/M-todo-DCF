@@ -20,10 +20,13 @@ try:
                                attach as attach_industry, get_ref, industry_names, reference_status)
     from dcf_models import (MOAT_SPREADS, BETA_MIN, BETA_MAX, ZONE_NAMES, price_zones, implied_wacc, field_checks, margin_options, Params, data_checks, route_model,
                             run_scenarios, sensitivity, terminal_growth_default)
+    from methods_map import methods_map as build_methods_map, DORSEY_G_DEFAULT, DORSEY_G_RANGE, DORSEY_R_MIN
+    from industry_multiples import MULT_DATE
 except ImportError as _imp_err:   # archivos de versiones distintas en GitHub, o módulo viejo en memoria: diagnóstico claro
     import os as _os
     _aqui = _os.path.dirname(_os.path.abspath(__file__))
-    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "currency_diagnostic", "lote.py": "implied_wacc"}
+    _marcas = {"dcf_models.py": "clean_margin_trend", "industry_data.py": "USE_DAMODARAN_LIST", "damodaran_map.py": "def lookup", "data_yahoo.py": "EXTRA_FLOW_FIELDS", "lote.py": "methods_map",
+               "methods_map.py": "def methods_map", "industry_multiples.py": "def get_multiples"}
 
     def _tiene(archivo, marca):
         try:
@@ -83,7 +86,7 @@ COLOR_LEGEND = ("🟦 **Dato importado** · 🟨 **Supuesto** (editable en la ba
                 "🟩 **Cálculo**")
 STATE_ICON = {"ok": "✅", "aviso": "⚠️", "info": "ℹ️"}
 
-APP_VERSION = "v2.47.1 · 19/10/2026"
+APP_VERSION = "v2.48 · 20/10/2026"
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 if not (hasattr(data_yahoo, "statement_currency_check") and hasattr(data_yahoo, "currency_diagnostic")):
@@ -317,7 +320,7 @@ with st.sidebar:
     fin_mode = _fin_opts[st.selectbox("Moneda de los estados contables", list(_fin_opts), key=K("fincur"),
                                       help="Para empresas que reportan en otra moneda que la de cotización (ADRs). Yahoo a veces rotula mal la moneda "
                                            "(ej.: Vale y Petrobras dicen BRL pero los montos ya están en dólares) y los valores quedaban 5 veces chicos. "
-                                           "«Automática» compara precio/ventas y precio/valor libro con los de Yahoo y corrige sola; avisa cuando lo hace.")]
+                                           "«Automática» compara precio/ventas, precio/valor libro y precio/ganancia con los de Yahoo (vota cada señal) y corrige sola cuando al menos dos coinciden con «no convertir» y ninguna con «convertir»; avisa cuando lo hace.")]
     with st.expander("Ajustes avanzados"):
         margin_mode = st.selectbox("Margen operativo objetivo", ["median", "ttm", "analysts", "manual"], key=K("mmode"),
                                    format_func={"median": "Mediana histórica (3-4 años + TTM)",
@@ -620,6 +623,70 @@ label = alt.Chart(pd.DataFrame({"y": [co.price], "t": [f"Precio actual {co.price
     align="left", dx=4, dy=-6, color="#444").encode(y="y:Q", text="t:N", x=alt.value(4))
 st.altair_chart((bars + rule + label).properties(height=300), **STRETCH)
 
+# ----------------------------------------------------------------------------
+# Mapa de métodos (v2.48): otras formas de mirar el valor, al lado del DCF. No cambian el valor del modelo.
+# ----------------------------------------------------------------------------
+if model != "FCFF":
+    st.caption("🗺️ **Mapa de métodos:** solo se calcula para empresas valuadas por flujo libre (FCFF).")
+elif base.ok:
+    with st.expander("🗺️ Mapa de métodos: 5 formas de mirar el valor (no cambian el valor del modelo)", expanded=True):
+        _mc1, _mc2 = st.columns(2)
+        _dg = _mc1.select_slider("Método 3 (Dorsey): crecimiento anual del flujo de caja libre", options=[0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10],
+                                 value=DORSEY_G_DEFAULT, format_func=lambda v: f"{v:.0%}", key=K("dorsey_g"),
+                                 help="Dorsey, en su ejemplo de Clorox, usa un crecimiento prudente y constante (5 %) por 10 años y una perpetuidad de 3 %.")
+        _dr = _mc2.number_input(f"Método 3 (Dorsey): tasa de descuento en % (0 = automática: la mayor entre {DORSEY_R_MIN:.0%} y el costo del capital propio)",
+                                0.0, 25.0, 0.0, 0.5, key=K("dorsey_r"))
+        mp = build_methods_map(co, base, model, dorsey_g=_dg, dorsey_R=(_dr / 100.0 if _dr > 0 else None))
+        if not mp["applicable"]:
+            st.info(mp["reason"])
+        else:
+            _rows = []
+            for it in mp["items"]:
+                if it["valor"] is None:
+                    v_txt, r_txt = "n/d", "n/d"
+                elif it["rango"]:
+                    v_txt = f"{money(it['valor'], co.currency)}  (rango {money(it['rango'][0], '', 2)} – {money(it['rango'][1], '', 2)})"
+                    r_txt = f"{it['ratio']:.2f}×  ({it['ratio_rango'][0]:.2f}–{it['ratio_rango'][1]:.2f}×)"
+                else:
+                    v_txt, r_txt = money(it["valor"], co.currency), f"{it['ratio']:.2f}×"
+                _rows.append({"Método": it["nombre"], "Valor por acción": v_txt, "Valor ÷ precio": r_txt, "Qué es": it["nota"]})
+            st.dataframe(pd.DataFrame(_rows).set_index("Método"), **STRETCH)
+            _cd = pd.DataFrame([{"Método": it["nombre"].split(" (")[0], "Valor": it["valor"], "Tipo": "circular" if it["circular"] else "independiente"}
+                                for it in mp["items"] if it["valor"] is not None])
+            if not _cd.empty:
+                _bars = alt.Chart(_cd).mark_bar().encode(
+                    y=alt.Y("Método:N", sort=None, title=None), x=alt.X("Valor:Q", title=f"Valor por acción ({co.currency})"),
+                    color=alt.Color("Tipo:N", legend=None, scale=alt.Scale(domain=["independiente", "circular"], range=["#4f81bd", "#aaaaaa"])))
+                _rl = alt.Chart(pd.DataFrame({"x": [co.price]})).mark_rule(strokeDash=[6, 4], color="#444", size=2).encode(x="x:Q")
+                st.altair_chart((_bars + _rl).properties(height=40 * len(_cd) + 40), **STRETCH)
+                st.caption(f"Línea punteada: precio actual {money(co.price, co.currency)}. Gris: método circular (el valor sale cerca del precio por construcción).")
+            if mp["rango"]:
+                st.markdown(f"**Rango de los métodos independientes (1 a 4):** {money(mp['rango'][0], co.currency)} – {money(mp['rango'][1], co.currency)} "
+                            f"contra un precio de {money(co.price, co.currency)}. No se promedian: cada uno responde una pregunta distinta y tres comparten la tasa de descuento.")
+            pn = mp["panel"]
+            if pn:
+                st.markdown("**Panel a 5 años: ¿qué valdría y qué rendimiento tendría comprar hoy?**")
+                _pr = [
+                    {"": "Valor por acción en 5 años según el modelo", "Resultado": money(pn["valor5_modelo"], co.currency),
+                     "Si comprás hoy → retorno anual": pct(pn["retorno_modelo"]) if pn["retorno_modelo"] is not None else "n/d"},
+                ]
+                if pn["valor5_mult_hoy"] is not None:
+                    _pr.append({"": f"Valor por acción en 5 años si el mercado mantiene el múltiplo de hoy (EV/EBIT {pn['mult_hoy']:.1f}×)",
+                                "Resultado": money(pn["valor5_mult_hoy"], co.currency),
+                                "Si comprás hoy → retorno anual": pct(pn["retorno_mult_hoy"]) if pn["retorno_mult_hoy"] is not None else "n/d"})
+                st.dataframe(pd.DataFrame(_pr).set_index(""), **STRETCH)
+                if pn["mult_requerido"] is not None and pn["mult_hoy"]:
+                    _mr, _mh = pn["mult_requerido"], pn["mult_hoy"]
+                    _lec5 = ("el precio de hoy asume que dentro de 5 años el mercado pagará MÁS por esta empresa que hoy" if _mr > _mh * 1.05 else
+                             "alcanza con que el mercado pague menos que hoy: el precio actual deja margen" if _mr < _mh * 0.95 else
+                             "el precio de hoy exige que el mercado siga pagando lo mismo que hoy")
+                    st.markdown(f"**Múltiplo que hace falta en 5 años** (EV/EBIT) para ganar el costo del capital del modelo ({pn['wacc']:.1%}): "
+                                f"**{_mr:.1f}×** · hoy el mercado paga {_mh:.1f}× · el que sale de nuestro modelo es {pn['mult5_model']:.1f}×. → {_lec5}.")
+            for _n in mp["notas"]:
+                st.caption("• " + _n)
+            st.caption("Simplificaciones: se supone que todo el flujo libre llega al accionista y que la deuda neta y las acciones no cambian. "
+                       "Los múltiplos de industria son de Damodaran (EE.UU., " + MULT_DATE + "). El método 5 es una aproximación nuestra, NO es el número de Alpha Spread.")
+
 if all_warns:
     with st.expander(f"⚠️ Avisos y controles ({len(all_warns)})", expanded=True):
         for w in all_warns:
@@ -915,6 +982,8 @@ with t5:
   Si ROE = Ke, el valor es exactamente el book value.
 * **AFFO** (REITs). AFFO ≈ (resultado neto + amortización ± resultados por venta de activos) × ratio, o el AFFO/acción que
   ingreses. Lo retenido se reinvierte a Ke + spread, de ahí sale el crecimiento. Se descuenta a Ke.
+
+**Mapa de métodos (v2.48).** Debajo del veredicto, cinco formas de mirar el valor; NINGUNA cambia el valor del modelo y no se promedian. (1) Nuestro DCF a 10 años. (2) El mismo DCF pero cortado en el año 5, con valor final igual al múltiplo EV/EBITDA de la industria (Damodaran, EE.UU.) por el EBITDA del año 5. (3) *Estilo Dorsey*: flujo de caja libre real de Yahoo (flujo operativo − inversión) que crece un % constante 10 años (5 % por defecto, como en su ejemplo de Clorox) y después una perpetuidad de 3 %; tasa de descuento: la mayor entre 9 % y el costo del capital propio del modelo (la podés cambiar). (4) El múltiplo EV/EBITDA de la industria por el EBITDA de la empresa. (5) *Estilo Alpha*: como el 2 pero con el múltiplo EV/EBIT que el mercado paga hoy por la empresa; es circular (el valor sale cerca del precio por construcción) y es una aproximación nuestra, no el número de Alpha Spread. El **panel a 5 años** muestra qué valdría la empresa en 5 años según el modelo, el retorno anual de comprar hoy, y el múltiplo que hace falta en 5 años para ganar el costo del capital. Límites: solo FCFF (no financieras ni REIT); los múltiplos de industria son de EE.UU. aunque la empresa sea de otro país; el método Dorsey puede salir muy bajo si el flujo de caja libre de los últimos 12 meses es transitoriamente chico; se supone que todo el flujo libre llega al accionista.
 
 **Industria de comparación (v2.43).** La app busca cada empresa en la planilla de Damodaran «Companies in each industry» (48.156 empresas, las mismas 94 industrias de sus tablas) por ticker, por sufijo de bolsa o por nombre, y usa su industria exacta; si la empresa no figura, usa la industria de Yahoo traducida con reglas propias. La clasificación de Damodaran es por código industrial (SIC) y a veces no es la intuitiva (Alphabet y Meta en *Software (Entertainment)*; Caterpillar en *Construction Supplies*). Excepción (v2.45): Visa, Mastercard, PayPal, procesadores de pagos, bolsas y proveedores de datos figuran en la planilla junto con los prestamistas; si se valúan por flujo libre y casi no tienen deuda (deuda ≤ 1,5 veces su capitalización), se comparan con *Business & Consumer Services* (donde Damodaran pone a Equifax, TransUnion y Verisk). Los prestamistas (AmEx, Capital One...) se valúan por retorno excedente y conservan su grupo. Se puede cambiar a mano en el selector.
 

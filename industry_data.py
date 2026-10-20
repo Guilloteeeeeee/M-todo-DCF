@@ -25,6 +25,7 @@ def reference_status(today=None):
     Devuelve [{'nombre','fecha','meses','limite_meses','vencida','donde'}]. Para agregar otra tabla, sumar una fila a _ITEMS."""
     from datetime import date
     from damodaran_map import DAM_FILE_DATE, DAM_FILE_ISO
+    from industry_multiples import MULT_DATE, MULT_DATE_ISO
     hoy = today or date.today()
     items = [
         ("Prima de riesgo de mercado (ERP)", ERP_DATE, ERP_DATE_ISO, ERP_MAX_MESES,
@@ -33,6 +34,8 @@ def reference_status(today=None):
          "Damodaran → Data → tablas de enero (betas, márgenes, ROC por industria; riesgo país; impuestos)"),
         ("Planilla de empresas por industria", DAM_FILE_DATE, DAM_FILE_ISO, 12,
          "Damodaran → «Companies in each industry» (indname.xls); se rehace damodaran_companies.tsv.gz"),
+        ("Múltiplos por industria (EV/EBITDA)", MULT_DATE, MULT_DATE_ISO, 12,
+         "Damodaran → Data → «Enterprise Value» (vebitda.html, empresas con EBITDA positivo, EE.UU.); se rehace industry_multiples.py"),
     ]
     out = []
     for nombre, fecha, iso, limite, donde in items:

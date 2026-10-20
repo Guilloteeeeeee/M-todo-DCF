@@ -264,9 +264,9 @@ def test_datos_de_referencia_avisan_cuando_vencen():
     from datetime import date
     import industry_data as idt
     hoy = idt.reference_status(date(2026, 10, 20))
-    assert [r["vencida"] for r in hoy] == [False, False, False], hoy
+    assert [r["vencida"] for r in hoy] == [False, False, False, False], hoy
     tarde = {r["nombre"][:8]: r for r in idt.reference_status(date(2027, 5, 1))}
-    assert tarde["Prima de"]["vencida"] and tarde["Tablas p"]["vencida"] and not tarde["Planilla"]["vencida"]   # mayo 2027: ERP y tablas de enero vencidas, la planilla no
+    assert tarde["Prima de"]["vencida"] and tarde["Tablas p"]["vencida"] and tarde["Múltiplo"]["vencida"] and not tarde["Planilla"]["vencida"]   # mayo 2027: ERP y tablas de enero vencidas, la planilla no
     muy = idt.reference_status(date(2027, 12, 1))
     assert all(r["vencida"] for r in muy) and "Companies in each industry" in muy[2]["donde"]
 
@@ -318,6 +318,35 @@ def test_conversion_correcta_no_se_toca():
     assert abs(co3.fx - 0.2) < 1e-12
 
 
+def test_vale_real_precio_ventas_roto_pero_valor_libro_y_ganancia_votan():
+    """v2.47.2, caso VALE con datos reales de Yahoo: el precio/ventas de Yahoo mezcla monedas (no coincide con nada = se abstiene),
+    pero precio/valor libro y precio/ganancia coinciden con los montos SIN convertir: dos votos a favor, ninguno en contra -> se corrige."""
+    dfa, dfq = frames(sym="VAL", cur="BRL")
+    fxb = lambda a, b: 0.2 if (a, b) == ("BRL", "USD") else None
+    summ = {"beta": 1.0, "priceToSalesTrailing12Months": 0.3, "trailingPE": 8000 / 100 * 0.97}
+    ks = {"sharesOutstanding": 200e6, "priceToBook": 8000 / 620 * 1.05}
+    co, w = build_company("VAL", price, summ, ks, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co.fx - 1.0) < 1e-12 and abs(co.revenue_ttm - 1040.0) < 1e-9, (co.fx, co.revenue_ttm)
+    assert any("Moneda de los estados contables corregida" in x and "precio/ganancia" in x for x in w)
+    # con una sola señal a favor (solo valor libro) no alcanza: se confía en la etiqueta
+    co1, w1 = build_company("VAL", price, {"beta": 1.0, "priceToSalesTrailing12Months": 0.3}, ks, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co1.fx - 0.2) < 1e-12 and not any("corregida" in x for x in w1)
+    # si una señal vota «convertir» (conversión correcta), no se corrige aunque las otras no coincidan
+    summ3 = {"beta": 1.0, "priceToSalesTrailing12Months": 8000 / (1040 * 0.2), "trailingPE": 8000 / 100 * 0.97}
+    co3, w3 = build_company("VAL", price, summ3, ks, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co3.fx - 0.2) < 1e-12 and not any("corregida" in x for x in w3)
+
+
+def test_conversion_correcta_con_las_tres_senales_no_se_toca():
+    """TSM/SAP: si la conversión era correcta, las tres señales de Yahoo coinciden con los montos convertidos."""
+    dfa, dfq = frames(sym="VAL", cur="BRL")
+    fxb = lambda a, b: 0.2 if (a, b) == ("BRL", "USD") else None
+    summ = {"beta": 1.0, "priceToSalesTrailing12Months": 8000 / (1040 * 0.2), "trailingPE": 8000 / (100 * 0.2)}
+    ks = {"sharesOutstanding": 200e6, "priceToBook": 8000 / (620 * 0.2)}
+    co, w = build_company("VAL", price, summ, ks, prof, {"financialCurrency": "BRL"}, trend, dfa, dfq, fxb)
+    assert abs(co.fx - 0.2) < 1e-12 and not any("corregida" in x for x in w)
+
+
 def test_moneda_manual_y_euro_no_se_corrigen_solos():
     dfa, dfq = frames(sym="VAL", cur="BRL")
     fxb = lambda a, b: 0.2 if (a, b) == ("BRL", "USD") else None
@@ -335,6 +364,25 @@ def test_moneda_manual_y_euro_no_se_corrigen_solos():
     co3, w3 = build_company("ABC", price, {"beta": 1.1, "priceToSalesTrailing12Months": 8000 / 1040}, {"sharesOutstanding": 200e6, "priceToBook": 8000 / 620},
                             prof, {"financialCurrency": "EUR"}, trend, dfe, dfqe, fx)
     assert abs(co3.fx - 1.10) < 1e-12 and not any("corregida" in x for x in w3)
+
+
+def test_flujo_de_caja_libre_de_yahoo_y_alternativa():
+    """v2.48: el flujo de caja libre real (flujo operativo − inversión) se lee de Yahoo; si falta la fila pero está el flujo operativo, se calcula."""
+    dfa, dfq = frames()
+    # TTM con FreeCashFlow y OperatingCashFlow (moneda EUR -> USD x1,10)
+    dfa.loc[dfa["periodType"] == "TTM", "FreeCashFlow"] = 85.0e6
+    dfa.loc[dfa["periodType"] == "TTM", "OperatingCashFlow"] = 140.0e6
+    co, _ = build_company("ABC", price, {"beta": 1.1}, {"sharesOutstanding": 200e6}, prof, {"financialCurrency": "EUR"}, trend, dfa, dfq, fx)
+    assert abs(co.fcf_ttm - 85.0 * 1.10) < 1e-9 and abs(co.cfo_ttm - 140.0 * 1.10) < 1e-9, (co.fcf_ttm, co.cfo_ttm)
+    # sin la fila FreeCashFlow: flujo operativo − inversión (capex TTM = 55)
+    dfb, dfqb = frames()
+    dfb.loc[dfb["periodType"] == "TTM", "OperatingCashFlow"] = 140.0e6
+    co2, _ = build_company("ABC", price, {"beta": 1.1}, {"sharesOutstanding": 200e6}, prof, {"financialCurrency": "EUR"}, trend, dfb, dfqb, fx)
+    assert abs(co2.fcf_ttm - (140.0 - 55.0) * 1.10) < 1e-9, co2.fcf_ttm
+    # sin ninguna: queda sin dato (el método Dorsey no se calcula, el resto sí)
+    dfc, dfqc = frames()
+    co3, _ = build_company("ABC", price, {"beta": 1.1}, {"sharesOutstanding": 200e6}, prof, {"financialCurrency": "EUR"}, trend, dfc, dfqc, fx)
+    assert co3.fcf_ttm is None and co3.cfo_ttm is None
 
 
 def test_diagnostico_de_moneda_devuelve_campos_de_yahoo():

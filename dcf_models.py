@@ -110,6 +110,10 @@ class CompanyData:
     ind_margin: Optional[float] = None     # margen EBIT promedio del sector (Damodaran)
     ind_de: Optional[float] = None         # deuda / capital propio de mercado promedio del sector
 
+    # --- flujo de caja real de Yahoo (v2.48; para el método estilo Dorsey)
+    fcf_ttm: Optional[float] = None    # flujo de caja libre = flujo operativo − inversión, últimos 12 meses (M, moneda de cotización)
+    cfo_ttm: Optional[float] = None    # flujo de caja operativo, últimos 12 meses
+
     # --- referencia
     target_price: Optional[float] = None
     n_analysts: Optional[int] = None

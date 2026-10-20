@@ -46,6 +46,8 @@ BAL_FIELDS = [
 ALL_FIELDS = FLOW_FIELDS + BAL_FIELDS
 # Partidas solo informativas (v2.38): se piden aparte para que, si Yahoo no las tiene, no se rompa la descarga principal.
 EXTRA_BAL_FIELDS = ["AccountsReceivable", "NonCurrentAccountsReceivable"]
+# v2.48: flujo de caja libre y flujo operativo de Yahoo (para el método «estilo Dorsey»). También se piden aparte: si faltan, el modelo sigue igual.
+EXTRA_FLOW_FIELDS = ["FreeCashFlow", "OperatingCashFlow"]
 
 
 # ----------------------------------------------------------------------------
@@ -214,11 +216,13 @@ FX_CHECK_MIN_GAP = 0.20     # solo se controla si la conversión mueve los monto
 
 
 def statement_currency_check(fin_cur: str, qcur: str, fxr: float, mc: Optional[float], rev: Optional[float],
-                             equity: Optional[float], summary: dict, keystats: dict) -> Optional[str]:
+                             equity: Optional[float], summary: dict, keystats: dict, ni: Optional[float] = None) -> Optional[str]:
     """Caso Vale/Petrobras: Yahoo rotula los estados contables como BRL pero los montos ya vienen en dólares (los ADR presentan en USD),
     y la app los dividía otra vez por el tipo de cambio (todo quedaba ~5 veces chico y el valor por acción salía en 0,26×).
-    Control: precio/ventas y precio/valor libro no dependen de la moneda y Yahoo los informa. Si con nuestra conversión no coinciden
-    con los de Yahoo pero SIN convertir sí coinciden (todos los que se pueden comparar), los montos ya estaban en la moneda de cotización.
+    Control (v2.47.2, por votación): precio/ventas, precio/valor libro y precio/ganancia no dependen de la moneda y Yahoo los informa.
+    Cada señal vota «no convertir» (coincide con Yahoo sin convertir y no con nuestra conversión), «convertir» (al revés) o se abstiene
+    (no coincide con ninguna: pasa con el precio/ventas de los ADR brasileños, que Yahoo calcula mezclando monedas).
+    Se corrige solo si al menos DOS señales votan «no convertir» y NINGUNA vota «convertir».
     Devuelve el texto de la evidencia, o None si no hay motivo para dudar (o si no se puede comprobar)."""
     if fxr is None or fxr <= 0 or fin_cur == qcur or not mc or mc <= 0:
         return None
@@ -231,12 +235,21 @@ def statement_currency_check(fin_cur: str, qcur: str, fxr: float, mc: Optional[f
     pb_y = _first(sf(keystats.get("priceToBook")), sf(summary.get("priceToBook")))
     if pb_y and pb_y > 0 and equity and equity > 0:
         pairs.append(("precio/valor libro", mc / (equity * fxr), pb_y))
+    pe_y = _first(sf(summary.get("trailingPE")), sf(keystats.get("trailingPE")))
+    if pe_y and pe_y > 0 and ni and ni > 0:
+        pairs.append(("precio/ganancia", mc / (ni * fxr), pe_y))
     if not pairs:
         return None
     lim = math.log(FX_CHECK_TOL)
-    sin_conv = [abs(math.log(o / y * fxr)) <= lim for _, o, y in pairs]    # si los montos ya estaban en la moneda de cotización
-    con_conv = [abs(math.log(o / y)) <= lim for _, o, y in pairs]          # si la conversión era correcta
-    if all(sin_conv) and not any(con_conv):
+    votos_no = votos_si = 0
+    for _, o, y in pairs:
+        sin_conv = abs(math.log(o / y * fxr)) <= lim      # si los montos ya estaban en la moneda de cotización
+        con_conv = abs(math.log(o / y)) <= lim            # si la conversión era correcta
+        if sin_conv and not con_conv:
+            votos_no += 1
+        elif con_conv and not sin_conv:
+            votos_si += 1
+    if votos_no >= 2 and votos_si == 0:
         return "; ".join(f"{n}: con conversión {o:.1f}×, Yahoo informa {y:.1f}×, sin convertir {o * fxr:.1f}×" for n, o, y in pairs)
     return None
 
@@ -325,6 +338,10 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
     bb = F.ttm("RepurchaseOfCapitalStock")
     gains = F.ttm("GainLossOnSaleOfPPE")
     rd_ttm = F.ttm("ResearchAndDevelopment")
+    cfo = F.ttm("OperatingCashFlow")
+    fcf = F.ttm("FreeCashFlow")
+    if fcf is None and cfo is not None and capex is not None:
+        fcf = cfo - abs(capex)                         # flujo operativo menos inversión en activos fijos (definición de Dorsey)
 
     tax_eff = None
     if tax is not None and pretax is not None and pretax > 0:
@@ -368,7 +385,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         fxr, fin_cur = 1.0, qcur
         warns.append(f"Moneda de los estados contables: elegiste «ya están en {qcur}». No se convirtieron (Yahoo los rotula como otra moneda).")
     elif fin_cur != qcur and fin_cur_mode == "auto":
-        _ev = statement_currency_check(fin_cur, qcur, fxr, None if cap_estimated else mc, rev, equity, summary, keystats)
+        _ev = statement_currency_check(fin_cur, qcur, fxr, None if cap_estimated else mc, rev, equity, summary, keystats, ni)
         if _ev:
             warns.append(f"⚠️ Moneda de los estados contables corregida: Yahoo los rotula como {fin_cur}, pero los montos ya están en {qcur} "
                          f"({_ev}). No se convirtieron. Si esto no coincide con lo que reporta la empresa, elegí «Convertir siempre» "
@@ -412,6 +429,7 @@ def build_company(sym: str, price_m: dict, summary: dict, keystats: dict, profil
         dividends_ttm=abs(M(div) or 0.0), buybacks_ttm=abs(M(bb) or 0.0),
         gains_adj_ttm=M(gains) or 0.0,
         rd_ttm=abs(M(rd_ttm) or 0.0), rd_hist=[abs(M(x)) for x in rd_h if x is not None],
+        fcf_ttm=M(fcf), cfo_ttm=M(cfo),
         target_price=sf(fin.get("targetMeanPrice")),
         n_analysts=int(sf(fin.get("numberOfAnalystOpinions")) or 0) or None,
         ttm_source=src, asof=str(asof.date()) if asof is not None else "",
@@ -713,6 +731,12 @@ def load_company(sym: str, allow_annual: bool = False, adr_ratio: Optional[float
         dfa, dfq = _merge_extra(dfa, _xa, sym), _merge_extra(dfq, _xq, sym)
     except Exception:  # noqa: BLE001
         pass                                           # informativo: sin estas partidas el modelo funciona igual
+    try:
+        _fa = t.get_financial_data(EXTRA_FLOW_FIELDS, frequency="a", trailing=True)
+        _fq = t.get_financial_data(EXTRA_FLOW_FIELDS, frequency="q", trailing=True)
+        dfa, dfq = _merge_extra(dfa, _fa, sym), _merge_extra(dfq, _fq, sym)
+    except Exception:  # noqa: BLE001
+        pass                                           # sin flujo de caja libre real el método Dorsey no se calcula (el resto sí)
 
     fb_price = fb_cur = None
     if not sf(price_m.get("regularMarketPrice")):

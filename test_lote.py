@@ -131,6 +131,29 @@ def test_columna_criterio_de_margen():
     assert "Criterio de margen" in COLUMNS and COLUMNS.index("Criterio de margen") == COLUMNS.index("TTM − objetivo (pp)") + 1
 
 
+def test_columnas_del_mapa_de_metodos():
+    """v2.48: el lote trae los métodos 2 a 5 como múltiplo del precio, el rango de los métodos independientes y el panel a 5 años."""
+    co = industrial(ticker="IND", sector="Industrials", industry="Specialty Industrial Machinery", country="United States", fcf_ttm=900.0)
+    row, raw = lote.evaluate("IND", loader(co))
+    assert row["Estado"] == "OK", row
+    for k in ("Método 2 ÷ precio", "Método 3 ÷ precio", "Método 4 ÷ precio", "Método 5 (circular) ÷ precio", "Métodos 1-4: mín ÷ precio",
+              "Métodos 1-4: máx ÷ precio", "Retorno anual 5a (múltiplo de hoy)", "Múltiplo EV/EBIT hoy", "Múltiplo EV/EBIT requerido en 5a", "FCF real TTM (M)"):
+        assert k in row and row[k] is not None, k
+    assert row["Métodos 1-4: mín ÷ precio"] <= row["Base"] / co.price <= row["Métodos 1-4: máx ÷ precio"] + 1e-9
+    assert row["FCF real TTM (M)"] == 900.0
+    # sin flujo de caja libre real: Dorsey vacío, el resto igual
+    co2 = industrial(ticker="IND", sector="Industrials", industry="Specialty Industrial Machinery", country="United States")
+    row2, _ = lote.evaluate("IND", loader(co2))
+    assert row2["Método 3 ÷ precio"] is None and row2["Método 2 ÷ precio"] is not None
+    # el Excel las incluye
+    xl = lote.build_excel([row, row2], {"IND": raw})
+    wb = openpyxl.load_workbook(io.BytesIO(xl))
+    hdr = [c.value for c in wb["Lote"][1]]
+    assert "Método 3 ÷ precio" in hdr and "Múltiplo EV/EBIT requerido en 5a" in hdr
+    # las banderas nuevas tienen explicación
+    assert "precio sobre todos los métodos" in lote.FLAG_HELP and "precio bajo todos los métodos" in lote.FLAG_HELP
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):
